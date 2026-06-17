@@ -26,6 +26,21 @@ const countryPhoneCodes = {
   ET: '+251',
 }
 
+const fallbackCountries = [
+  { Code: 'KE', Name: 'Kenya', Flag: '🇰🇪', Currency: 'KES', CurrencyName: 'Kenyan Shilling', IsActive: true },
+  { Code: 'UG', Name: 'Uganda', Flag: '🇺🇬', Currency: 'UGX', CurrencyName: 'Ugandan Shilling', IsActive: true },
+  { Code: 'US', Name: 'United States', Flag: '🇺🇸', Currency: 'USD', CurrencyName: 'US Dollar', IsActive: true },
+  { Code: 'GB', Name: 'United Kingdom', Flag: '🇬🇧', Currency: 'GBP', CurrencyName: 'British Pound', IsActive: true },
+  { Code: 'NG', Name: 'Nigeria', Flag: '🇳🇬', Currency: 'NGN', CurrencyName: 'Nigerian Naira', IsActive: true },
+  { Code: 'ZA', Name: 'South Africa', Flag: '🇿🇦', Currency: 'ZAR', CurrencyName: 'South African Rand', IsActive: true },
+  { Code: 'GH', Name: 'Ghana', Flag: '🇬🇭', Currency: 'GHS', CurrencyName: 'Ghanaian Cedi', IsActive: true },
+  { Code: 'TZ', Name: 'Tanzania', Flag: '🇹🇿', Currency: 'TZS', CurrencyName: 'Tanzanian Shilling', IsActive: true },
+  { Code: 'ET', Name: 'Ethiopia', Flag: '🇪🇹', Currency: 'ETB', CurrencyName: 'Ethiopian Birr', IsActive: true },
+  { Code: 'IN', Name: 'India', Flag: '🇮🇳', Currency: 'INR', CurrencyName: 'Indian Rupee', IsActive: true },
+  { Code: 'EU', Name: 'European Union', Flag: '🇪🇺', Currency: 'EUR', CurrencyName: 'Euro', IsActive: true },
+  { Code: 'SG', Name: 'Singapore', Flag: '🇸🇬', Currency: 'SGD', CurrencyName: 'Singapore Dollar', IsActive: true },
+]
+
 function Signup() {
   const [form, setForm] = useState({
     email: '',
@@ -35,7 +50,7 @@ function Signup() {
     country_code: '',
     role: 'user',
   })
-  const [countries, setCountries] = useState([])
+  const [countries, setCountries] = useState(fallbackCountries)
   const [error, setError] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const { register } = useAuth()
@@ -43,8 +58,12 @@ function Signup() {
 
   useEffect(() => {
     authApi.getCountries().then((res) => {
-      setCountries(res.data)
-    }).catch(() => {})
+      if (res.data && res.data.length > 0) {
+        setCountries(res.data)
+      }
+    }).catch(() => {
+      // Keep using fallbackCountries if API is unavailable
+    })
   }, [])
 
   const handleChange = (e) => {
