@@ -3,6 +3,12 @@
 
 # Build artifacts
 instadoh-backend/instadoh-backend
+
+# SQLite database files
+*.db
+*.db-shm
+*.db-wal
+
 *.exe
 *.exe~
 *.dll
