@@ -1,0 +1,23 @@
+# Environment
+.env
+
+# Build artifacts
+instadoh-backend/instadoh-backend
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Output of go coverage
+*.out
+
+# Go workspace
+go.work
+
+# IDE
+.vscode/
+.idea/
