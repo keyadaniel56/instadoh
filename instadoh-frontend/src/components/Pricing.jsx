@@ -1,53 +1,50 @@
 import React from 'react'
 import { Link } from 'react-router-dom'
+import { Check, ChevronRight } from 'lucide-react'
 
 const plans = [
   {
     name: 'Starter',
-    description: 'Perfect for individuals and small businesses getting started with Lightning.',
+    description: 'Perfect for individuals exploring the Lightning Network.',
     price: 'Free',
     period: 'forever',
     features: [
-      'Up to 100 transactions/month',
-      'Basic dashboard',
-      'Email support',
+      'Up to 100 txs/month',
+      'Basic analytics',
       'API access',
-      'Single wallet',
+      'Single node wallet',
     ],
-    cta: 'Get Started Free',
+    cta: 'Get Started',
     featured: false,
   },
   {
     name: 'Business',
-    description: 'For growing businesses that need more power and flexibility.',
+    description: 'For growing businesses requiring high-volume rails.',
     price: '$29',
     period: '/month',
     features: [
-      'Up to 10,000 transactions/month',
-      'Advanced analytics',
-      'Priority support',
+      '10,000 txs/month',
+      'Advanced node metrics',
+      'Priority settlement',
       'API + Webhooks',
-      'Multi-wallet support',
-      'Custom invoices',
-      'Team access (5 users)',
+      'Multi-node management',
+      'Custom branding',
     ],
     cta: 'Start Free Trial',
     featured: true,
   },
   {
     name: 'Enterprise',
-    description: 'For large organizations requiring dedicated infrastructure and support.',
+    description: 'Dedicated infrastructure for large scale operations.',
     price: '$99',
     period: '/month',
     features: [
-      'Unlimited transactions',
-      'Real-time analytics',
-      'Dedicated support',
-      'Advanced API features',
-      'Unlimited wallets',
-      'Custom integrations',
-      'Unlimited team members',
+      'Unlimited volume',
+      'Real-time audit log',
+      '24/7 dedicated support',
+      'Advanced LND config',
       'SLA guarantee',
+      'White-label solution',
     ],
     cta: 'Contact Sales',
     featured: false,
@@ -56,19 +53,13 @@ const plans = [
 
 function Pricing() {
   return (
-    <section className="section pricing" id="pricing">
+    <section className="section" id="pricing" style={{ background: 'var(--color-surface)' }}>
       <div className="container">
-        <div className="pricing-header">
-          <span className="section-label">
-            <span>✦</span>
-            Pricing
-          </span>
-          <h2 className="section-title">
-            Simple, Transparent{' '}
-            <span className="text-gradient">Pricing</span>
-          </h2>
-          <p className="section-subtitle">
-            No hidden fees, no surprise charges. Choose the plan that fits your needs.
+        <div style={{ textAlign: 'center', marginBottom: '80px' }}>
+          <div className="section-label">Pricing</div>
+          <h2 className="section-title">Scale with <span className="text-gold">Confidence</span></h2>
+          <p className="section-subtitle" style={{ margin: '0 auto' }}>
+            Choose the settlement tier that matches your business throughput. All plans include non-custodial security.
           </p>
         </div>
 
@@ -78,27 +69,30 @@ function Pricing() {
               className={`pricing-card ${plan.featured ? 'featured' : ''}`}
               key={index}
             >
-              {plan.featured && <span className="pricing-badge">Most Popular</span>}
-              <h3 className="pricing-name">{plan.name}</h3>
-              <p className="pricing-description">{plan.description}</p>
+              {plan.featured && <span className="pricing-badge">Popular Choice</span>}
+              <h3 style={{ fontSize: '1.25rem', marginBottom: '12px', color: plan.featured ? 'var(--color-primary)' : 'inherit' }}>{plan.name}</h3>
+              <p style={{ color: 'var(--color-text-muted)', fontSize: '0.875rem', marginBottom: '32px' }}>{plan.description}</p>
+              
               <div className="pricing-amount">
                 {plan.price} <span>{plan.period}</span>
               </div>
-              <div className="pricing-period">
-                {plan.price === 'Free' ? 'No credit card required' : ''}
-              </div>
-
-              <div className="pricing-features">
+              
+              <div style={{ margin: '32px 0', flex: 1 }}>
                 {plan.features.map((feature, i) => (
-                  <div className="pricing-feature" key={i}>
-                    <span className="pricing-feature-icon">✓</span>
-                    {feature}
+                  <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '16px', fontSize: '0.9375rem' }}>
+                    <Check size={16} className="text-gold" />
+                    <span style={{ color: 'var(--color-text-main)' }}>{feature}</span>
                   </div>
                 ))}
               </div>
 
-              <Link to="/dashboard" className="btn btn-primary">
-                {plan.cta}
+              <Link 
+                to="/signup" 
+                className={`btn ${plan.featured ? 'btn-primary' : 'btn-secondary'}`}
+                style={{ width: '100%' }}
+              >
+                <span>{plan.cta}</span>
+                <ChevronRight size={16} />
               </Link>
             </div>
           ))}
