@@ -9,6 +9,7 @@ import (
 	"instadoh-backend/models"
 
 	"gorm.io/driver/postgres"
+	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
@@ -17,7 +18,67 @@ var DB *gorm.DB
 
 // Init establishes the database connection and runs auto-migrations
 func Init(cfg *config.Config) *gorm.DB {
+	var db *gorm.DB
+	var err error
+
+	if cfg.Database.Driver == "sqlite" {
+		db, err = initSQLite(cfg)
+	} else {
+		db, err = initPostgres(cfg)
+	}
+
+	if err != nil {
+		log.Fatalf("Could not connect to database: %v", err)
+	}
+
+	// Configure connection pool (only applies to postgres, sqlite ignores this)
+	if cfg.Database.Driver != "sqlite" {
+		sqlDB, err := db.DB()
+		if err != nil {
+			log.Fatalf("Failed to get underlying sql.DB: %v", err)
+		}
+		sqlDB.SetMaxIdleConns(10)
+		sqlDB.SetMaxOpenConns(100)
+		sqlDB.SetConnMaxLifetime(time.Hour)
+	}
+
+	// Run auto-migrations
+	if err := runMigrations(db); err != nil {
+		log.Fatalf("Failed to run migrations: %v", err)
+	}
+
+	// Seed countries
+	if err := seedCountries(db); err != nil {
+		log.Printf("Warning: Failed to seed countries: %v", err)
+	}
+
+	DB = db
+	log.Printf("Database connected (%s) and migrations completed successfully", cfg.Database.Driver)
+	return db
+}
+
+func initSQLite(cfg *config.Config) (*gorm.DB, error) {
+	dsn := cfg.DSN() // returns file path like "instadoh.db"
+	log.Printf("Connecting to SQLite database: %s", dsn)
+
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Info),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to open SQLite database: %w", err)
+	}
+
+	// Enable WAL mode for better concurrent performance
+	db.Exec("PRAGMA journal_mode=WAL")
+	// Enable foreign keys
+	db.Exec("PRAGMA foreign_keys=ON")
+
+	return db, nil
+}
+
+func initPostgres(cfg *config.Config) (*gorm.DB, error) {
 	dsn := cfg.DSN()
+	log.Printf("Connecting to PostgreSQL database: %s:%d/%s", cfg.Database.Host, cfg.Database.Port, cfg.Database.DBName)
 
 	var db *gorm.DB
 	var err error
@@ -34,33 +95,7 @@ func Init(cfg *config.Config) *gorm.DB {
 		time.Sleep(time.Duration(i+1) * time.Second)
 	}
 
-	if err != nil {
-		log.Fatalf("Could not connect to database after 10 attempts: %v", err)
-	}
-
-	// Configure connection pool
-	sqlDB, err := db.DB()
-	if err != nil {
-		log.Fatalf("Failed to get underlying sql.DB: %v", err)
-	}
-
-	sqlDB.SetMaxIdleConns(10)
-	sqlDB.SetMaxOpenConns(100)
-	sqlDB.SetConnMaxLifetime(time.Hour)
-
-	// Run auto-migrations
-	if err := runMigrations(db); err != nil {
-		log.Fatalf("Failed to run migrations: %v", err)
-	}
-
-	// Seed countries
-	if err := seedCountries(db); err != nil {
-		log.Printf("Warning: Failed to seed countries: %v", err)
-	}
-
-	DB = db
-	log.Println("Database connected and migrations completed successfully")
-	return db
+	return db, err
 }
 
 func runMigrations(db *gorm.DB) error {
@@ -69,6 +104,8 @@ func runMigrations(db *gorm.DB) error {
 		&models.Country{},
 		&models.Transaction{},
 		&models.APIKey{},
+		&models.MobileMoneyTransaction{},
+		&models.CrossBorderTransaction{},
 	)
 }
 

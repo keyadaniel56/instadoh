@@ -72,6 +72,48 @@ type APIKey struct {
 	CreatedAt time.Time
 }
 
+// MobileMoneyTransaction tracks mobile money deposits and withdrawals
+type MobileMoneyTransaction struct {
+	ID              uint                       `gorm:"primaryKey"`
+	UserID          uint                       `gorm:"index;not null"`
+	Type            string                     `gorm:"size:20;not null"` // "deposit" or "withdrawal"
+	Provider        types.MobileMoneyProvider  `gorm:"size:50;not null"`
+	ProviderRef     string                     `gorm:"uniqueIndex;size:255"` // checkout request ID or provider ref
+	PhoneNumber     string                     `gorm:"size:50;not null"`
+	Amount          float64                    `gorm:"type:decimal(20,2);not null"`
+	Currency        string                     `gorm:"size:3;not null"`
+	Status          types.MobileMoneyStatus    `gorm:"size:20;default:'pending'"`
+	FailureReason   string                     `gorm:"size:500"`
+	ResultCode      string                     `gorm:"size:50"`
+	ResultDesc      string                     `gorm:"size:255"`
+	TransactionID   uint                       `gorm:"index"` // links to internal transaction table
+	InternalTxID    string                     `gorm:"size:255"` // internal transaction UUID
+	SettledAt       *time.Time
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+}
+
+// CrossBorderTransaction tracks Kenya↔Uganda cross-border payments
+type CrossBorderTransaction struct {
+	ID              uint       `gorm:"primaryKey"`
+	SenderID        uint       `gorm:"index;not null"`       // user sending money
+	ReceiverPhone   string     `gorm:"size:50;not null"`     // recipient's phone number
+	ReceiverCountry string     `gorm:"size:2;not null"`      // KE or UG
+	SendAmount      float64    `gorm:"type:decimal(20,2);not null"`
+	SendCurrency    string     `gorm:"size:3;not null"`
+	ReceiveAmount   float64    `gorm:"type:decimal(20,2);not null"`
+	ReceiveCurrency string     `gorm:"size:3;not null"`
+	ExchangeRate    float64    `gorm:"type:decimal(20,8);not null"`
+	Fee             float64    `gorm:"type:decimal(20,2);default:0"`
+	Status          string     `gorm:"size:20;default:'pending'"` // pending, completed, failed
+	LightningTxID   string     `gorm:"size:255"`                  // payment hash from LN
+	MobileTxID      uint       `gorm:"index"`                     // mobile money tx record
+	Description     string     `gorm:"size:500"`
+	CompletedAt     *time.Time
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+}
+
 // --- Table name customizations ---
 
 func (User) TableName() string {
@@ -88,6 +130,14 @@ func (Transaction) TableName() string {
 
 func (APIKey) TableName() string {
 	return "api_keys"
+}
+
+func (MobileMoneyTransaction) TableName() string {
+	return "mobile_money_transactions"
+}
+
+func (CrossBorderTransaction) TableName() string {
+	return "cross_border_transactions"
 }
 
 // --- Model to Response converters ---

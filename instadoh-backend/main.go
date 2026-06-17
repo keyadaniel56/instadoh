@@ -27,8 +27,10 @@ func main() {
 
 	// Initialize database
 	db := database.Init(cfg)
-	sqlDB, _ := db.DB()
-	defer sqlDB.Close()
+	sqlDB, dbErr := db.DB()
+	if dbErr == nil {
+		defer sqlDB.Close()
+	}
 
 	// Initialize LND service
 	lndService := services.NewLNDService(&cfg.LND)
@@ -43,18 +45,54 @@ func main() {
 		cfg.Exchange.CacheTTL,
 	)
 
+	// Initialize M-Pesa service
+	mpesaConfig := &services.MpesaConfig{
+		ConsumerKey:    cfg.Mpesa.ConsumerKey,
+		ConsumerSecret: cfg.Mpesa.ConsumerSecret,
+		Passkey:        cfg.Mpesa.Passkey,
+		ShortCode:      cfg.Mpesa.ShortCode,
+		Environment:    cfg.Mpesa.Environment,
+		CallbackURL:    cfg.Mpesa.CallbackURL,
+	}
+	mpesaService := services.NewMpesaService(mpesaConfig)
+	if cfg.Mpesa.ConsumerKey == "" {
+		log.Println("WARNING: M-Pesa not configured (missing MPESA_CONSUMER_KEY). Kenyan mobile money features disabled.")
+	} else {
+		log.Println("M-Pesa service initialized")
+	}
+
+	// Initialize Uganda Mobile Money service
+	ugandaMobileConfig := &services.UgandaMobileConfig{
+		APIBaseURL:  cfg.UgandaMobile.APIBaseURL,
+		APIUsername: cfg.UgandaMobile.APIUsername,
+		APIPassword: cfg.UgandaMobile.APIPassword,
+		CallbackURL: cfg.UgandaMobile.CallbackURL,
+	}
+	ugandaMobileService := services.NewUgandaMobileService(ugandaMobileConfig)
+	log.Println("Uganda Mobile Money service initialized")
+
 	// Initialize auth middleware
 	authMiddleware := middleware.NewAuthMiddleware(&cfg.JWT)
 
 	// Initialize payment service
 	paymentService := services.NewPaymentService(db, lndService, exchangeService, cfg)
 
+	// Initialize cross-border service
+	crossBorderService := services.NewCrossBorderService(
+		db,
+		exchangeService,
+		lndService,
+		mpesaService,
+		ugandaMobileService,
+	)
+
 	// Initialize handlers
 	userHandler := handlers.NewUserHandler(db, cfg, authMiddleware)
 	paymentHandler := handlers.NewPaymentHandler(paymentService, exchangeService)
+	crossBorderHandler := handlers.NewCrossBorderHandler(crossBorderService)
 
 	// Setup Gin router
-	router := setupRouter(cfg, authMiddleware, userHandler, paymentHandler)
+	router := setupRouter(cfg, authMiddleware, userHandler, paymentHandler, crossBorderHandler)
 
 	// Start server
 	addr := cfg.Server.Host + ":" + fmt.Sprintf("%d", cfg.Server.Port)
@@ -80,7 +118,9 @@ func main() {
 	<-quit
 
 	log.Println("Shutting down server...")
-	sqlDB.Close()
+	if dbErr == nil && sqlDB != nil {
+		sqlDB.Close()
+	}
 	log.Println("Server stopped")
 }
 
@@ -89,6 +129,7 @@ func setupRouter(
 	auth *middleware.AuthMiddleware,
 	userHandler *handlers.UserHandler,
 	paymentHandler *handlers.PaymentHandler,
+	crossBorderHandler *handlers.CrossBorderHandler,
 ) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
@@ -147,6 +188,46 @@ func setupRouter(
 			paymentGroup.GET("/balance", paymentHandler.GetBalance)
 			paymentGroup.GET("/stats", paymentHandler.GetStats)
 			paymentGroup.POST("/convert", paymentHandler.ConvertCurrency)
+		}
+
+		// Cross-border payment routes (protected)
+		crossBorderGroup := v1.Group("/cross-border")
+		crossBorderGroup.Use(auth.RequireAuth())
+		{
+			crossBorderGroup.GET("/quote", crossBorderHandler.GetQuote)
+			crossBorderGroup.POST("/send", crossBorderHandler.SendCrossBorder)
+			crossBorderGroup.GET("/transactions", crossBorderHandler.ListCrossBorderTransactions)
+			crossBorderGroup.GET("/transactions/:id", crossBorderHandler.GetCrossBorderTransaction)
+		}
+
+		// M-Pesa mobile money routes (Kenya)
+		mpesaGroup := v1.Group("/mpesa")
+		{
+			// Protected endpoints
+			mpesaProtected := mpesaGroup.Group("")
+			mpesaProtected.Use(auth.RequireAuth())
+			{
+				mpesaProtected.POST("/deposit", crossBorderHandler.DepositMpesa)
+				mpesaProtected.POST("/withdraw", crossBorderHandler.WithdrawMpesa)
+			}
+			// Public webhook/callback routes (secured by signature verification in production)
+			mpesaGroup.POST("/callback", crossBorderHandler.MpesaCallback)
+			mpesaGroup.POST("/result", crossBorderHandler.MpesaResultCallback)
+			mpesaGroup.POST("/timeout", func(c *gin.Context) {
+				c.JSON(http.StatusOK, gin.H{"ResultCode": 0, "ResultDesc": "Success"})
+			})
+		}
+
+		// Uganda Mobile Money routes
+		ugandaMobileGroup := v1.Group("/uganda-mobile")
+		{
+			ugandaMobileProtected := ugandaMobileGroup.Group("")
+			ugandaMobileProtected.Use(auth.RequireAuth())
+			{
+				ugandaMobileProtected.POST("/deposit", crossBorderHandler.DepositUgandaMobile)
+				ugandaMobileProtected.POST("/withdraw", crossBorderHandler.WithdrawUgandaMobile)
+			}
+			ugandaMobileGroup.POST("/callback", crossBorderHandler.UgandaMobileCallback)
 		}
 
 		// Webhook (no auth - secured by signature verification in production)

@@ -29,6 +29,23 @@ const (
 	DirectionOutgoing PaymentDirection = "outgoing"
 )
 
+// MobileMoneyProvider indicates the mobile money provider
+type MobileMoneyProvider string
+
+const (
+	MMProviderMpesa       MobileMoneyProvider = "mpesa"
+	MMProviderUgandaMobile MobileMoneyProvider = "uganda_mobile"
+)
+
+// MobileMoneyTransactionStatus tracks mobile money payment state
+type MobileMoneyStatus string
+
+const (
+	MMStatusPending   MobileMoneyStatus = "pending"
+	MMStatusCompleted MobileMoneyStatus = "completed"
+	MMStatusFailed    MobileMoneyStatus = "failed"
+)
+
 // --- Request DTOs ---
 
 type RegisterRequest struct {
@@ -65,10 +82,45 @@ type WebhookRequest struct {
 	SettledAmt  int64  `json:"settled_amt"`
 }
 
+// MpesaSTKPushRequest initiates an M-Pesa STK Push
+type MpesaSTKPushRequest struct {
+	PhoneNumber string  `json:"phone_number" binding:"required"`
+	Amount      float64 `json:"amount" binding:"required,gt=0"`
+}
+
+// MpesaWithdrawRequest initiates an M-Pesa B2C withdrawal
+type MpesaWithdrawRequest struct {
+	PhoneNumber string  `json:"phone_number" binding:"required"`
+	Amount      float64 `json:"amount" binding:"required,gt=0"`
+}
+
+// UgandaMobileDepositRequest initiates a Uganda mobile money deposit
+type UgandaMobileDepositRequest struct {
+	PhoneNumber string  `json:"phone_number" binding:"required"`
+	Amount      float64 `json:"amount" binding:"required,gt=0"`
+	Provider    string  `json:"provider" binding:"required"` // e.g., "mtn", "airtel"
+}
+
+// CrossBorderSendRequest handles sending cross-border
+type CrossBorderSendRequest struct {
+	RecipientPhone string  `json:"recipient_phone" binding:"required"`
+	RecipientCountry string `json:"recipient_country" binding:"required,len=2"` // KE or UG
+	Amount         float64 `json:"amount" binding:"required,gt=0"`
+	Currency       string  `json:"currency" binding:"required,len=3"` // Sender's currency (KES or UGX)
+	Description    string  `json:"description"`
+}
+
+// CrossBorderQuoteRequest gets a quote for a cross-border transfer
+type CrossBorderQuoteRequest struct {
+	FromCurrency string  `json:"from_currency" binding:"required,len=3"`
+	ToCurrency   string  `json:"to_currency" binding:"required,len=3"`
+	Amount       float64 `json:"amount" binding:"required,gt=0"`
+}
+
 // --- Response DTOs ---
 
 type AuthResponse struct {
-	Token string      `json:"token"`
+	Token string       `json:"token"`
 	User  UserResponse `json:"user"`
 }
 
@@ -119,4 +171,27 @@ type BalanceResponse struct {
 type ErrorResponse struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
+}
+
+// MpesaResponse represents the response from an M-Pesa transaction
+type MpesaResponse struct {
+	CheckoutRequestID string  `json:"checkout_request_id,omitempty"`
+	ResponseCode      string  `json:"response_code"`
+	ResponseDesc      string  `json:"response_description"`
+	MerchantRequestID string  `json:"merchant_request_id,omitempty"`
+	Amount            float64 `json:"amount"`
+	PhoneNumber       string  `json:"phone_number"`
+	Status            string  `json:"status"`
+}
+
+// CrossBorderQuote holds a quote for cross-border transfer
+type CrossBorderQuote struct {
+	FromCurrency  string  `json:"from_currency"`
+	ToCurrency    string  `json:"to_currency"`
+	SendAmount    float64 `json:"send_amount"`
+	ReceiveAmount float64 `json:"receive_amount"`
+	ExchangeRate  float64 `json:"exchange_rate"`
+	Fee           float64 `json:"fee"`
+	TotalInFiat   float64 `json:"total_in_fiat"`
+	ValidUntil    string  `json:"valid_until"`
 }
