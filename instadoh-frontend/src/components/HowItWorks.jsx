@@ -1,48 +1,56 @@
 import React from 'react'
+import { UserPlus, Wallet, Zap, ChevronRight } from 'lucide-react'
 
 const steps = [
   {
-    number: '01',
-    title: 'Create Your Account',
-    description: 'Sign up in minutes with just your email. No lengthy KYC processes, no waiting for approvals.',
+    icon: <UserPlus size={24} />,
+    title: 'Provision Account',
+    description: 'Sign up in minutes. No legacy bank bureaucracy, just pure Lightning-fast access.',
   },
   {
-    number: '02',
-    title: 'Connect Your Wallet',
-    description: 'Link your Lightning Network wallet or let us create one for you. Supports LND, c-lightning, and Eclair.',
+    icon: <Wallet size={24} />,
+    title: 'Initialize Node',
+    description: 'Connect your sovereign LND node or utilize our high-availability hosted infrastructure.',
   },
   {
-    number: '03',
-    title: 'Start Transacting',
-    description: 'Generate invoices, send payments, and manage transactions through our intuitive dashboard or API.',
+    icon: <Zap size={24} />,
+    title: 'Execute Settlements',
+    description: 'Deploy capital instantly. Generate invoices and settle global payments in milliseconds.',
   },
 ]
 
 function HowItWorks() {
   return (
-    <section className="section how-it-works" id="how-it-works">
+    <section className="section" id="how-it-works">
       <div className="container">
-        <div className="how-it-works-header">
-          <span className="section-label">
-            <span>✦</span>
-            Simple Process
-          </span>
-          <h2 className="section-title">
-            Get Started in{' '}
-            <span className="text-gradient">3 Easy Steps</span>
-          </h2>
-          <p className="section-subtitle">
-            Getting started with Lightning payments has never been easier.
-            No technical expertise required.
+        <div style={{ textAlign: 'center', marginBottom: '80px' }}>
+          <div className="section-label">The Process</div>
+          <h2 className="section-title">Zero Friction <span className="text-gold">Onboarding</span></h2>
+          <p className="section-subtitle" style={{ margin: '0 auto' }}>
+            Integrate Bitcoin's payment layer into your stack with minimal engineering overhead.
           </p>
         </div>
 
-        <div className="steps">
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '48px' }}>
           {steps.map((step, index) => (
-            <div className="step" key={index}>
-              <div className="step-number">{step.number}</div>
-              <h3>{step.title}</h3>
-              <p>{step.description}</p>
+            <div key={index} style={{ position: 'relative' }}>
+              <div style={{ 
+                width: '56px', height: '56px', background: 'rgba(255, 215, 0, 0.1)', 
+                color: 'var(--color-primary)', borderRadius: 'var(--radius-md)', 
+                display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: '24px'
+              }}>
+                {step.icon}
+              </div>
+              <h3 style={{ fontSize: '1.25rem', marginBottom: '16px' }}>{step.title}</h3>
+              <p style={{ color: 'var(--color-text-muted)', fontSize: '0.9375rem', lineHeight: '1.6' }}>{step.description}</p>
+              
+              {index < steps.length - 1 && (
+                <div style={{ 
+                  position: 'absolute', top: '28px', left: '100%', width: '40px', 
+                  borderTop: '1px dashed var(--color-border)', transform: 'translateX(4px)',
+                  display: 'none' // Hidden on smaller screens, we can add a media query if needed
+                }}></div>
+              )}
             </div>
           ))}
         </div>
