@@ -1,0 +1,654 @@
+{
+	"info": {
+		"_postman_id": "9c25d627-ed62-4242-800e-eb8dbe598d48",
+		"name": "InstaDoh API",
+		"description": "InstaDoh — instant cross-border Lightning payments between Kenya and Uganda. Settles over the Bitcoin Lightning Network while users only ever see local currency.\n\n**Setup:**\n1. Update the `baseUrl` collection variable if your backend is not on localhost:8080.\n2. Run **Register** to create a user, then **Login** (its test script saves the JWT into the `token` collection variable automatically).\n3. All protected requests use `Authorization: Bearer {{token}}`.\n4. Lightning endpoints require an LND node (see README → Lightning Network (LND) Setup).",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"variable": [
+		{
+			"key": "baseUrl",
+			"value": "http://localhost:8080/api/v1"
+		},
+		{
+			"key": "token",
+			"value": ""
+		}
+	],
+	"item": [
+		{
+			"name": "Auth",
+			"item": [
+				{
+					"name": "Register",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"ken@test.com\",\n  \"phone\": \"254712345678\",\n  \"password\": \"password123\",\n  \"full_name\": \"Ken User\",\n  \"country_code\": \"KE\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/auth/register",
+							"host": ["{{baseUrl}}"],
+							"path": ["auth", "register"]
+						},
+						"description": "Create a user. country_code must be a seeded code: KE (KES) or UG (UGX). Also accepts role: \"user\" or \"merchant\"."
+					},
+					"response": []
+				},
+				{
+					"name": "Login",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"const json = pm.response.json();",
+									"if (json.token) {",
+									"    pm.collectionVariables.set('token', json.token);",
+									"    console.log('Token saved to collection variable');",
+									"}",
+									"pm.test('Login successful', () => pm.expect(pm.response.code).to.equal(200));"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"ken@test.com\",\n  \"password\": \"password123\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/auth/login",
+							"host": ["{{baseUrl}}"],
+							"path": ["auth", "login"]
+						},
+						"description": "Log in. The test script automatically stores the returned JWT in the `token` collection variable used by all protected requests."
+					},
+					"response": []
+				},
+				{
+					"name": "Refresh Token",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{token}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/auth/refresh",
+							"host": ["{{baseUrl}}"],
+							"path": ["auth", "refresh"]
+						},
+						"description": "Returns a fresh JWT. Uses the current Bearer token as input."
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Public",
+			"item": [
+				{
+					"name": "Health",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "http://localhost:8080/health",
+							"host": ["http://localhost:8080"],
+							"path": ["health"]
+						},
+						"description": "Server health check (no /api/v1 prefix)."
+					},
+					"response": []
+				},
+				{
+					"name": "Countries",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/countries",
+							"host": ["{{baseUrl}}"],
+							"path": ["countries"]
+						},
+						"description": "List supported countries (KE, UG, and more)."
+					},
+					"response": []
+				},
+				{
+					"name": "Exchange Rates",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/payments/rates?currency=KES",
+							"host": ["{{baseUrl}}"],
+							"path": ["payments", "rates"],
+							"query": [
+								{
+									"key": "currency",
+									"value": "KES"
+								}
+							]
+						},
+						"description": "Live BTC price and exchange rate relative to USD."
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Payments (Lightning)",
+			"item": [
+				{
+					"name": "Get Balance",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{token}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/payments/balance",
+							"host": ["{{baseUrl}}"],
+							"path": ["payments", "balance"]
+						},
+						"description": "Current wallet balance in the user's local currency."
+					},
+					"response": []
+				},
+				{
+					"name": "Create Invoice",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{token}}"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"amount\": 500,\n  \"currency\": \"KES\",\n  \"description\": \"receive test\",\n  \"expiry_seconds\": 3600\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/payments/invoices",
+							"host": ["{{baseUrl}}"],
+							"path": ["payments", "invoices"]
+						},
+						"description": "Create a real bolt11 Lightning invoice. Amount is in local currency (KES/UGX), converted to sats automatically. The response includes a scannable payment_request. Requires LND connected."
+					},
+					"response": []
+				},
+				{
+					"name": "Send Payment",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{token}}"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"invoice\": \"lnbc...\",\n  \"amount\": 200,\n  \"currency\": \"KES\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/payments/send",
+							"host": ["{{baseUrl}}"],
+							"path": ["payments", "send"]
+						},
+						"description": "Pay a bolt11 invoice. For fixed-amount invoices the invoice amount is respected; for zero-amount invoices the specified local-currency amount is used. Debited from the user's local-currency balance. Requires LND connected."
+					},
+					"response": []
+				},
+				{
+					"name": "List Transactions",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{token}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/payments/transactions?page=1&limit=20",
+							"host": ["{{baseUrl}}"],
+							"path": ["payments", "transactions"],
+							"query": [
+								{
+									"key": "page",
+									"value": "1"
+								},
+								{
+									"key": "limit",
+									"value": "20"
+								}
+							]
+						},
+						"description": "Paged transaction history (incoming + outgoing)."
+					},
+					"response": []
+				},
+				{
+					"name": "Get Transaction",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{token}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/payments/transactions/1",
+							"host": ["{{baseUrl}}"],
+							"path": ["payments", "transactions", "1"]
+						},
+						"description": "Transaction detail. Pending incoming payments are reconciled against LND on fetch, so a settled invoice shows as completed with a preimage."
+					},
+					"response": []
+				},
+				{
+					"name": "Get Stats",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{token}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/payments/stats",
+							"host": ["{{baseUrl}}"],
+							"path": ["payments", "stats"]
+						},
+						"description": "Totals received/sent, transaction count, pending count."
+					},
+					"response": []
+				},
+				{
+					"name": "Convert Currency",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{token}}"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"amount\": 1000,\n  \"from_currency\": \"KES\",\n  \"to_currency\": \"UGX\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/payments/convert",
+							"host": ["{{baseUrl}}"],
+							"path": ["payments", "convert"]
+						},
+						"description": "Convert an amount between any supported currencies."
+					},
+					"response": []
+				},
+				{
+					"name": "Webhook (settle)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"payment_hash\": \"<hex rhash>\",\n  \"status\": \"settled\",\n  \"preimage\": \"<hex preimage>\",\n  \"settled_amt\": 50000\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/payments/webhook",
+							"host": ["{{baseUrl}}"],
+							"path": ["payments", "webhook"]
+						},
+						"description": "Alternative settlement signal to the invoice subscription. Credits the recipient balance (idempotent — safe to call twice)."
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Cross-Border",
+			"item": [
+				{
+					"name": "Get Quote",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{token}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/cross-border/quote?from_currency=KES&to_currency=UGX&amount=1000",
+							"host": ["{{baseUrl}}"],
+							"path": ["cross-border", "quote"],
+							"query": [
+								{
+									"key": "from_currency",
+									"value": "KES"
+								},
+								{
+									"key": "to_currency",
+									"value": "UGX"
+								},
+								{
+									"key": "amount",
+									"value": "1000"
+								}
+							]
+						},
+						"description": "KES ↔ UGX cross-border quote (2% fee, valid ~2 min)."
+					},
+					"response": []
+				},
+				{
+					"name": "Send Cross-Border",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{token}}"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"recipient_phone\": \"256772123456\",\n  \"recipient_country\": \"UG\",\n  \"amount\": 1000,\n  \"currency\": \"KES\",\n  \"description\": \"school fees\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/cross-border/send",
+							"host": ["{{baseUrl}}"],
+							"path": ["cross-border", "send"]
+						},
+						"description": "Send from KE to a UG phone (or vice versa). Deducts sender balance + 2% fee, executes the Lightning leg, and pays out to the recipient's mobile money. Works without LND in limited mode."
+					},
+					"response": []
+				},
+				{
+					"name": "List Cross-Border Transactions",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{token}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/cross-border/transactions?page=1&limit=20",
+							"host": ["{{baseUrl}}"],
+							"path": ["cross-border", "transactions"],
+							"query": [
+								{
+									"key": "page",
+									"value": "1"
+								},
+								{
+									"key": "limit",
+									"value": "20"
+								}
+							]
+						},
+						"description": "Paged cross-border transfer history."
+					},
+					"response": []
+				},
+				{
+					"name": "Get Cross-Border Transaction",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{token}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/cross-border/transactions/1",
+							"host": ["{{baseUrl}}"],
+							"path": ["cross-border", "transactions", "1"]
+						},
+						"description": "Cross-border transfer detail."
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "M-Pesa (Kenya)",
+			"item": [
+				{
+					"name": "Deposit (STK Push)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{token}}"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"phone_number\": \"254712345678\",\n  \"amount\": 500\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/mpesa/deposit",
+							"host": ["{{baseUrl}}"],
+							"path": ["mpesa", "deposit"]
+						},
+						"description": "Prompt an M-Pesa STK Push to fund the wallet. Requires MPESA_CONSUMER_KEY/SECRET configured."
+					},
+					"response": []
+				},
+				{
+					"name": "Withdraw (B2C)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{token}}"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"phone_number\": \"254712345678\",\n  \"amount\": 500\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/mpesa/withdraw",
+							"host": ["{{baseUrl}}"],
+							"path": ["mpesa", "withdraw"]
+						},
+						"description": "Send money from the wallet to an M-Pesa number. Deducts balance, pays via B2C."
+					},
+					"response": []
+				},
+				{
+					"name": "STK Callback",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"Body\": {\n    \"stkCallback\": {\n      \"MerchantRequestID\": \"m-1\",\n      \"CheckoutRequestID\": \"ws_CO_1\",\n      \"ResultCode\": 0,\n      \"ResultDesc\": \"The service request is processed successfully.\",\n      \"CallbackMetadata\": {\n        \"Item\": [\n          { \"Name\": \"Amount\", \"Value\": 500 },\n          { \"Name\": \"MpesaReceiptNumber\", \"Value\": \"SGH123456\" },\n          { \"Name\": \"PhoneNumber\", \"Value\": 254712345678 }\n        ]\n      }\n    }\n  }\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/mpesa/callback",
+							"host": ["{{baseUrl}}"],
+							"path": ["mpesa", "callback"]
+						},
+						"description": "Safaricom STK-Push callback. Credits the user's balance when ResultCode is 0. Use the CheckoutRequestID from a real deposit response."
+					},
+					"response": []
+				},
+				{
+					"name": "B2C Result Callback",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"Result\": {\n    \"ConversationID\": \"AG_1\",\n    \"ResultCode\": 0,\n    \"ResultDesc\": \"Success\",\n    \"TransactionID\": \"SGH654321\"\n  }\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/mpesa/result",
+							"host": ["{{baseUrl}}"],
+							"path": ["mpesa", "result"]
+						},
+						"description": "B2C result callback. Refunds the user if ResultCode != 0."
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Uganda Mobile Money",
+			"item": [
+				{
+					"name": "Deposit",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{token}}"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"phone_number\": \"256772123456\",\n  \"provider\": \"mtn\",\n  \"amount\": 5000\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/uganda-mobile/deposit",
+							"host": ["{{baseUrl}}"],
+							"path": ["uganda-mobile", "deposit"]
+						},
+						"description": "MTN/Airtel deposit (provider: \"mtn\" or \"airtel\"). Simulated in dev mode."
+					},
+					"response": []
+				},
+				{
+					"name": "Withdraw",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{token}}"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"phone_number\": \"256772123456\",\n  \"provider\": \"mtn\",\n  \"amount\": 5000\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/uganda-mobile/withdraw",
+							"host": ["{{baseUrl}}"],
+							"path": ["uganda-mobile", "withdraw"]
+						},
+						"description": "MTN/Airtel withdrawal (provider: \"mtn\" or \"airtel\"). Deducts balance."
+					},
+					"response": []
+				},
+				{
+					"name": "Callback",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"transaction_id\": \"TXN-123\",\n  \"status\": \"successful\",\n  \"reference\": \"REF-123\",\n  \"amount\": 5000,\n  \"phone_number\": \"256772123456\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/uganda-mobile/callback",
+							"host": ["{{baseUrl}}"],
+							"path": ["uganda-mobile", "callback"]
+						},
+						"description": "Provider callback. Credits the user when status is \"successful\"."
+					},
+					"response": []
+				}
+			]
+		}
+	]
+}
