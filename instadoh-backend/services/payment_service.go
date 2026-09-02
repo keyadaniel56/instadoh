@@ -2,8 +2,10 @@ package services
 
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
+	"math"
 	"time"
 
 	"instadoh-backend/config"
@@ -76,19 +78,19 @@ func (s *PaymentService) CreateInvoice(userID uint, req *types.CreateInvoiceRequ
 	}
 
 	// Create the Lightning invoice
-	lnInvoice, err := s.lnd.CreateInvoice(user, amountMsat, req.Description, req.ExpirySeconds)
+	lnInvoice, err := s.lnd.CreateInvoice(amountMsat, req.Description, req.ExpirySeconds)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create lightning invoice: %w", err)
 	}
 
 	paymentHash := hex.EncodeToString(lnInvoice.RHash)
+	paymentRequest := lnInvoice.PaymentRequest
 	expiry := time.Now().Add(time.Duration(req.ExpirySeconds) * time.Second)
 	if req.ExpirySeconds <= 0 {
 		expiry = time.Now().Add(1 * time.Hour)
 	}
 
 	// Record the transaction in the database
-	// Note: lnrpc v0.0.2 AddInvoiceResponse only has RHash, no PaymentRequest string
 	tx := &models.Transaction{
 		UserID:         user.ID,
 		Amount:         req.Amount,
@@ -97,7 +99,7 @@ func (s *PaymentService) CreateInvoice(userID uint, req *types.CreateInvoiceRequ
 		Direction:      types.DirectionIncoming,
 		Status:         types.TxStatusPending,
 		PaymentHash:    paymentHash,
-		PaymentRequest: "", // Not available in lnrpc v0.0.2
+		PaymentRequest: paymentRequest,
 		Description:    req.Description,
 		ExchangeRate:   exchangeRateToUSD,
 	}
@@ -108,7 +110,7 @@ func (s *PaymentService) CreateInvoice(userID uint, req *types.CreateInvoiceRequ
 
 	return &types.InvoiceResponse{
 		ID:             tx.ID,
-		PaymentRequest: "", // Not available in lnrpc v0.0.2
+		PaymentRequest: paymentRequest,
 		Amount:         req.Amount,
 		Currency:       req.Currency,
 		Description:    req.Description,
@@ -119,15 +121,18 @@ func (s *PaymentService) CreateInvoice(userID uint, req *types.CreateInvoiceRequ
 }
 
 // SendPayment sends a Lightning payment on behalf of a user
+// The user pays in their local currency; the system converts and settles over
+// Lightning instantly. The user never deals with BTC directly.
 func (s *PaymentService) SendPayment(userID uint, req *types.SendPaymentRequest) (*types.TransactionResponse, error) {
 	user, err := s.getUserByID(userID)
 	if err != nil {
 		return nil, fmt.Errorf("user not found: %w", err)
 	}
 
-	// Check user balance
-	if user.Balance < req.Amount {
-		return nil, fmt.Errorf("insufficient balance: have %.2f, need %.2f", user.Balance, req.Amount)
+	// Decode the payment request to validate it and get the amount
+	decoded, err := s.lnd.DecodePaymentRequest(req.Invoice)
+	if err != nil {
+		return nil, fmt.Errorf("invalid payment request: %w", err)
 	}
 
 	// Get BTC/USD price for conversion
@@ -136,7 +141,7 @@ func (s *PaymentService) SendPayment(userID uint, req *types.SendPaymentRequest)
 		return nil, fmt.Errorf("failed to get BTC price: %w", err)
 	}
 
-	// Convert fiat amount to millisatoshis
+	// Get the rate for the user's currency relative to USD
 	var exchangeRateToUSD float64
 	if req.Currency == "USD" {
 		exchangeRateToUSD = 1.0
@@ -148,21 +153,46 @@ func (s *PaymentService) SendPayment(userID uint, req *types.SendPaymentRequest)
 		exchangeRateToUSD = rate
 	}
 
-	// exchangeRateToUSD is "how many units of this currency per 1 USD" (e.g., KES=150)
-	// So to convert KES to USD: amount / rate = USD
-	var usdAmount float64
-	if req.Currency == "USD" {
-		usdAmount = req.Amount
+	// Determine the amount to pay in millisatoshis.
+	// If the invoice has a fixed amount, respect it; otherwise use the amount
+	// requested by the user in their local currency.
+	var amountMsat int64
+	var amountInCurrency float64
+	if decoded.AmountMsat > 0 {
+		amountMsat = decoded.AmountMsat
+		// Convert the invoice's msat value back to the user's local currency.
+		usdValue := float64(amountMsat) / 1e11 * btcPrice
+		if req.Currency == "USD" {
+			amountInCurrency = usdValue
+		} else {
+			amountInCurrency = usdValue * exchangeRateToUSD
+		}
 	} else {
-		usdAmount = req.Amount / exchangeRateToUSD
+		// Zero-amount invoice: pay whatever the user specified in local currency.
+		var usdAmount float64
+		if req.Currency == "USD" {
+			usdAmount = req.Amount
+		} else {
+			usdAmount = req.Amount / exchangeRateToUSD
+		}
+		btcPortion := usdAmount / btcPrice
+		amountMsat = int64(btcPortion * 1e11)
+		amountInCurrency = req.Amount
 	}
-	btcPortion := usdAmount / btcPrice
-	amountMsat := int64(btcPortion * 1e11)
 
-	// Decode the payment request to validate it and get the amount
-	decoded, err := s.lnd.DecodePaymentRequest(req.Invoice)
-	if err != nil {
-		return nil, fmt.Errorf("invalid payment request: %w", err)
+	if amountMsat <= 0 {
+		return nil, fmt.Errorf("amount too small after conversion")
+	}
+
+	// For fixed-amount invoices, respect the invoice amount in the user's
+	// currency rather than the (possibly incompatible) requested amount.
+	if decoded.AmountMsat > 0 {
+		req.Amount = math.Round(amountInCurrency*100) / 100
+	}
+
+	// Check user balance
+	if user.Balance < req.Amount {
+		return nil, fmt.Errorf("insufficient balance: have %.2f, need %.2f", user.Balance, req.Amount)
 	}
 
 	// Send the payment through Lightning Network
@@ -172,6 +202,7 @@ func (s *PaymentService) SendPayment(userID uint, req *types.SendPaymentRequest)
 	}
 
 	paymentHash := hex.EncodeToString(resp.PaymentHash)
+	preimage := hex.EncodeToString(resp.Preimage)
 
 	// Start a database transaction
 	txErr := s.db.Transaction(func(dbTx *gorm.DB) error {
@@ -190,10 +221,10 @@ func (s *PaymentService) SendPayment(userID uint, req *types.SendPaymentRequest)
 			Status:         types.TxStatusCompleted,
 			PaymentHash:    paymentHash,
 			PaymentRequest: req.Invoice,
-			Preimage:       "",
-			Counterparty:   "",
+			Preimage:       preimage,
+			Counterparty:   decoded.Destination,
 			Description:    decoded.Description,
-			FeeMsat:        0, // Fee info not available in lnrpc v0.0.2
+			FeeMsat:        resp.FeeMsat,
 			ExchangeRate:   exchangeRateToUSD,
 			SettledAt:      timePtr(time.Now()),
 		}
@@ -228,7 +259,7 @@ func (s *PaymentService) GetTransaction(userID uint, txID uint) (*types.Transact
 	if tx.Status == types.TxStatusPending && s.lnd.IsConnected() {
 		lnInvoice, err := s.lnd.GetInvoiceStatus(tx.PaymentHash)
 		if err == nil {
-			if lnInvoice.Settled {
+			if IsInvoiceSettled(lnInvoice) && tx.Direction == types.DirectionIncoming {
 				tx.Status = types.TxStatusCompleted
 				now := time.Now()
 				tx.SettledAt = &now
@@ -290,21 +321,46 @@ func (s *PaymentService) GetBalance(userID uint) (*types.BalanceResponse, error)
 	}, nil
 }
 
-// HandleInvoiceSettled processes a webhook or notification that an invoice was settled
+// HandleInvoiceSettled processes a webhook or subscription notification that an
+// invoice was settled. It credits the recipient's local-currency balance the
+// instant settlement is detected. Idempotent: already-completed transactions are
+// ignored so subscribers and webhooks cannot double-credit.
 func (s *PaymentService) HandleInvoiceSettled(paymentHash string, preimage string, settledAmt int64) error {
-	var tx models.Transaction
-	if err := s.db.Where("payment_hash = ?", paymentHash).First(&tx).Error; err != nil {
-		return fmt.Errorf("transaction not found for payment hash %s: %w", paymentHash, err)
+	if paymentHash == "" {
+		return fmt.Errorf("payment hash is empty")
 	}
 
-	// Update transaction status
+	var tx models.Transaction
+	if err := s.db.Where("payment_hash = ?", paymentHash).First(&tx).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			// The shared LND node may settle invoices that we did not create
+			// (e.g. wallet-to-wallet). Nothing to credit.
+			log.Printf("Settled invoice %s is not an InstaDoh transaction, ignoring", paymentHash)
+			return nil
+		}
+		return fmt.Errorf("transaction fetch failed for payment hash %s: %w", paymentHash, err)
+	}
+
+	// Already settled — avoid double-crediting.
+	if tx.Status == types.TxStatusCompleted && tx.Direction == types.DirectionIncoming {
+		return nil
+	}
+
 	now := time.Now()
 	tx.Status = types.TxStatusCompleted
-	tx.Preimage = preimage
 	tx.SettledAt = &now
+	if preimage != "" {
+		tx.Preimage = preimage
+	}
 
 	if err := s.db.Save(&tx).Error; err != nil {
 		return fmt.Errorf("failed to update transaction: %w", err)
+	}
+
+	// Only credit for incoming transactions.
+	if tx.Direction != types.DirectionIncoming {
+		log.Printf("Settled invoice %s is direction=%s, no credit applied", paymentHash, tx.Direction)
+		return nil
 	}
 
 	// Credit the user's balance (amount in their local currency)
@@ -318,7 +374,7 @@ func (s *PaymentService) HandleInvoiceSettled(paymentHash string, preimage strin
 		return fmt.Errorf("failed to credit user balance: %w", err)
 	}
 
-	log.Printf("Invoice settled: payment_hash=%s, user=%d, amount=%.2f %s",
+	log.Printf("Invoice settled: payment_hash=%s, user=%d, credited=%.2f %s",
 		paymentHash, tx.UserID, tx.Amount, tx.Currency)
 
 	return nil
@@ -339,10 +395,10 @@ func (s *PaymentService) GetStats(userID uint) (map[string]interface{}, error) {
 		Scan(&stats)
 
 	return map[string]interface{}{
-		"total_received": stats.TotalReceived,
-		"total_sent":     stats.TotalSent,
+		"total_received":    stats.TotalReceived,
+		"total_sent":        stats.TotalSent,
 		"transaction_count": stats.TxCount,
-		"pending_count":  stats.PendingCount,
+		"pending_count":     stats.PendingCount,
 	}, nil
 }
 
@@ -357,4 +413,3 @@ func (s *PaymentService) getUserByID(userID uint) (*models.User, error) {
 func timePtr(t time.Time) *time.Time {
 	return &t
 }
-

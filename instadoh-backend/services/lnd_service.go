@@ -5,13 +5,14 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"os"
+	"sync"
 	"time"
 
 	"instadoh-backend/config"
-	"instadoh-backend/models"
 
 	"github.com/lightningnetwork/lnd/lnrpc"
 	"google.golang.org/grpc"
@@ -20,11 +21,17 @@ import (
 	"google.golang.org/grpc/metadata"
 )
 
-// LNDService handles all Lightning Network interactions
+// LNDService handles all Lightning Network interactions via a modern LND gRPC
+// client. A single hot-wallet LND node sits behind the service and is shared by
+// all users. Lightning is used purely as an instant settlement rail: users see
+// their balances in local currency and are not exposed to the underlying BTC.
 type LNDService struct {
 	client      lnrpc.LightningClient
 	cfg         *config.LNDConfig
 	isConnected bool
+
+	mu          sync.Mutex
+	subscribers []func(*lnrpc.Invoice)
 }
 
 // NewLNDService creates a new LND gRPC client
@@ -44,6 +51,7 @@ func NewLNDService(cfg *config.LNDConfig) *LNDService {
 	return svc
 }
 
+// connect dials LND and authenticates using the admin macaroon and TLS cert.
 func (s *LNDService) connect() error {
 	macaroonBytes, err := loadMacaroonBytes(s.cfg.MacaroonPath)
 	if err != nil {
@@ -65,6 +73,10 @@ func (s *LNDService) connect() error {
 			ctx = metadata.AppendToOutgoingContext(ctx, "macaroon", macaroonHex)
 			return invoker(ctx, method, req, reply, cc, opts...)
 		}),
+		grpc.WithStreamInterceptor(func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+			ctx = metadata.AppendToOutgoingContext(ctx, "macaroon", macaroonHex)
+			return streamer(ctx, desc, cc, method, opts...)
+		}),
 	}
 
 	conn, err := grpc.Dial(s.cfg.Host, opts...)
@@ -82,19 +94,23 @@ func (s *LNDService) IsConnected() bool {
 	return s.isConnected
 }
 
-// CreateInvoice generates a Lightning invoice for a given amount in millisatoshis
-// Note: Uses the lnrpc v0.0.2 API where Invoice.Value is in satoshis
-func (s *LNDService) CreateInvoice(user *models.User, amountMsat int64, description string, expirySeconds int64) (*lnrpc.AddInvoiceResponse, error) {
+// CreateInvoice generates a real Lightning (bolt11) invoice for a given amount
+// in millisatoshis. The resulting payment request string can be shared directly
+// and scanned by any Lightning wallet.
+func (s *LNDService) CreateInvoice(amountMsat int64, description string, expirySeconds int64) (*lnrpc.AddInvoiceResponse, error) {
 	if !s.isConnected {
 		return nil, fmt.Errorf("LND not connected")
 	}
 
-	// Convert msat to satoshis (truncate, rounding up for safety)
-	valueSat := int64(math.Ceil(float64(amountMsat) / 1000.0))
+	expiry := expirySeconds
+	if expiry <= 0 {
+		expiry = 3600
+	}
 
 	invoice := &lnrpc.Invoice{
-		Memo:    description,
-		Value:   valueSat,
+		Memo:      description,
+		ValueMsat: amountMsat,
+		Expiry:    expiry,
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -108,57 +124,65 @@ func (s *LNDService) CreateInvoice(user *models.User, amountMsat int64, descript
 	return resp, nil
 }
 
-// PayInvoice pays a Lightning invoice using the streaming SendPayment API
-// Note: The v0.0.2 lnrpc API does not support paying bolt11 invoices directly via PaymentRequest.
-// This implementation uses the SendPayment streaming method with basic payment fields.
+// PayInvoice pays a Lightning (bolt11) invoice via the synchronous SendPayment
+// API. The specified amount is in millisatoshis (converted from the user's
+// local currency by the caller).
 func (s *LNDService) PayInvoice(paymentRequest string, amountMsat int64) (*SendPaymentResult, error) {
 	if !s.isConnected {
 		return nil, fmt.Errorf("LND not connected")
 	}
 
-	// Convert msat to satoshis
-	valueSat := int64(math.Ceil(float64(amountMsat) / 1000.0))
-
-	// Use the low-level SendPayment streaming API
-	// SendRequest only supports Dest, Amt, PaymentHash, FastSend in v0.0.2
-	// We attempt to decode the payment request to extract destination and payment hash
-	hashBytes, destBytes, err := parseBolt11(paymentRequest)
-	if err != nil {
-		// If we can't parse the bolt11, we can't pay it with this old API
-		return nil, fmt.Errorf("cannot pay bolt11 invoice with this LND API version (v0.0.2): %w", err)
-	}
-
+	// Prefer paying with the payment request string. LND will validate the
+	// amount against the invoice (for fixed-amount invoices) and route it.
 	req := &lnrpc.SendRequest{
-		Dest:        destBytes,
-		Amt:         valueSat,
-		PaymentHash: hashBytes,
+		PaymentRequest: paymentRequest,
+		AmtMsat:        amountMsat,
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	stream, err := s.client.SendPayment(ctx)
+	resp, err := s.client.SendPaymentSync(ctx, req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to initiate payment stream: %w", err)
+		return nil, fmt.Errorf("payment RPC failed: %w", err)
 	}
 
-	if err := stream.Send(req); err != nil {
-		return nil, fmt.Errorf("failed to send payment request: %w", err)
-	}
-
-	_, err = stream.Recv()
-	if err != nil {
-		return nil, fmt.Errorf("payment failed: %w", err)
+	if resp.PaymentError != "" {
+		return nil, fmt.Errorf("payment rejected by LND: %s", resp.PaymentError)
 	}
 
 	return &SendPaymentResult{
-		PaymentHash: hashBytes,
+		PaymentHash: resp.PaymentHash,
+		Preimage:    resp.PaymentPreimage,
+		FeeMsat:     routeFeeMsat(resp.PaymentRoute),
 	}, nil
 }
 
 // SendPaymentResult holds the result of a payment
 type SendPaymentResult struct {
 	PaymentHash []byte
+	Preimage    []byte
+	FeeMsat     int64
+}
+
+// routeFeeMsat sums the routing fees across all hops of a settled route.
+func routeFeeMsat(route *lnrpc.Route) int64 {
+	if route == nil {
+		return 0
+	}
+	var total int64
+	for _, hop := range rangeHops(route) {
+		total += hop.FeeMsat
+	}
+	return total
+}
+
+// rangeHops safely iterates over the hops in a route (avoids nil receivers).
+func rangeHops(route *lnrpc.Route) []*lnrpc.Hop {
+	if route == nil {
+		return nil
+	}
+	return route.Hops
 }
 
 // GetInvoiceStatus checks the status of an invoice
@@ -188,30 +212,110 @@ func (s *LNDService) GetInvoiceStatus(paymentHash string) (*lnrpc.Invoice, error
 }
 
 // DecodePaymentRequest decodes a Lightning payment request (Bolt11 invoice)
-// Uses basic parsing since lnrpc v0.0.2 doesn't have DecodePayReq
+// using the real DecodePayReq gRPC method.
 func (s *LNDService) DecodePaymentRequest(payReq string) (*DecodedPaymentRequest, error) {
-	hashBytes, destBytes, err := parseBolt11(payReq)
+	if !s.isConnected {
+		return nil, fmt.Errorf("LND not connected")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	decoded, err := s.client.DecodePayReq(ctx, &lnrpc.PayReqString{PayReq: payReq})
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode payment request: %w", err)
 	}
 
-	dest := ""
-	if len(destBytes) > 0 {
-		dest = hex.EncodeToString(destBytes)
-	}
-
 	return &DecodedPaymentRequest{
-		Destination:  dest,
-		PaymentHash:  hex.EncodeToString(hashBytes),
-		Description:  "",
+		Destination: decoded.Destination,
+		PaymentHash: decoded.PaymentHash,
+		Description: decoded.Description,
+		AmountMsat:  decoded.NumMsat,
+		NumSatoshis: decoded.NumSatoshis,
+		Expiry:      decoded.Expiry,
+		Timestamp:   decoded.Timestamp,
 	}, nil
 }
 
 // DecodedPaymentRequest holds parsed Bolt11 invoice data
 type DecodedPaymentRequest struct {
-	Destination  string
-	PaymentHash  string
-	Description  string
+	Destination string
+	PaymentHash string
+	Description string
+	AmountMsat  int64
+	NumSatoshis int64
+	Expiry      int64
+	Timestamp   int64
+}
+
+// IsSettled reports whether a fetched invoice has reached the SETTLED state.
+func IsInvoiceSettled(invoice *lnrpc.Invoice) bool {
+	if invoice == nil {
+		return false
+	}
+	return invoice.GetState() == lnrpc.Invoice_SETTLED
+}
+
+// SubscribeInvoiceSettlements opens a persistent stream of settled invoices and
+// invokes the provided callback for each. This is how the system lears that money
+// has arrived and immediately credits the user's local-currency balance.
+func (s *LNDService) SubscribeInvoiceSettlements(callback func(*lnrpc.Invoice)) {
+	s.mu.Lock()
+	s.subscribers = append(s.subscribers, callback)
+	s.mu.Unlock()
+
+	if !s.isConnected {
+		return
+	}
+
+	go func() {
+		for {
+			if !s.isConnected {
+				time.Sleep(5 * time.Second)
+				continue
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			stream, err := s.client.SubscribeInvoices(ctx, &lnrpc.InvoiceSubscription{})
+			if err != nil {
+				cancel()
+				log.Printf("WARNING: failed to subscribe to invoices, retrying: %v", err)
+				time.Sleep(5 * time.Second)
+				continue
+			}
+
+			for {
+				invoice, err := stream.Recv()
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					log.Printf("WARNING: invoice stream error: %v", err)
+					break
+				}
+				if invoice == nil {
+					continue
+				}
+				if IsInvoiceSettled(invoice) {
+					s.notify(invoice)
+				}
+			}
+			cancel()
+			log.Println("Invoice subscription stream ended, reconnecting...")
+			time.Sleep(3 * time.Second)
+		}
+	}()
+}
+
+func (s *LNDService) notify(invoice *lnrpc.Invoice) {
+	s.mu.Lock()
+	subs := make([]func(*lnrpc.Invoice), len(s.subscribers))
+	copy(subs, s.subscribers)
+	s.mu.Unlock()
+
+	for _, sub := range subs {
+		go sub(invoice)
+	}
 }
 
 // GetNodeInfo returns information about the LND node
@@ -249,6 +353,8 @@ func (s *LNDService) GetChannelBalance() (*lnrpc.ChannelBalanceResponse, error) 
 }
 
 // FiatToBTC converts a fiat amount to millisatoshis (msat)
+// exchangeRate is "how many units of local currency per 1 BTC-equivalent USD",
+// however in practice the caller passes the BTC price in the same units.
 func FiatToBTC(amount float64, exchangeRate float64) int64 {
 	btcAmount := amount / exchangeRate
 	msat := btcAmount * 1e11
@@ -259,22 +365,6 @@ func FiatToBTC(amount float64, exchangeRate float64) int64 {
 func BTCToFiat(msat int64, exchangeRate float64) float64 {
 	btcAmount := float64(msat) / 1e11
 	return btcAmount * exchangeRate
-}
-
-// --- Bolt11 parsing helpers ---
-// Minimal parsing since lnrpc v0.0.2 doesn't have DecodePayReq
-
-// parseBolt11 does minimal bolt11 invoice parsing to extract payment hash and destination.
-// Returns (paymentHashBytes, destPubKeyBytes, error)
-func parseBolt11(payReq string) ([]byte, []byte, error) {
-	if len(payReq) < 60 {
-		return nil, nil, fmt.Errorf("invalid bolt11 invoice: too short")
-	}
-
-	// Extract the payment hash from the bolt11 invoice
-	// In a proper implementation this would use a bolt11 decoding library
-	// For now, we return an error indicating this old LND API doesn't support paying bolt11 invoices
-	return nil, nil, fmt.Errorf("bolt11 invoice payment requires a newer LND API version")
 }
 
 // --- Helper functions ---

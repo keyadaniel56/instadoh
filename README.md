@@ -698,8 +698,8 @@ Configuration is managed via environment variables (loaded from a `.env` file). 
 | `JWT_SECRET`              | `change-me-in-production`      | JWT signing secret                   |
 | `JWT_EXPIRATION_HOURS`    | `24`                           | Token expiration in hours            |
 | `LND_HOST`                | `localhost:10009`              | LND gRPC host                        |
-| `LND_TLS_CERT`            | `/root/.lnd/tls.cert`          | LND TLS certificate path             |
-| `LND_MACAROON`            | `/root/.lnd/admin.macaroon`    | LND admin macaroon path              |
+| `LND_TLS_CERT`            | `.lnd/tls.cert`                | LND TLS certificate path or PEM      |
+| `LND_MACAROON`            | `.lnd/admin.macaroon`          | LND admin macaroon path or hex string |
 | `EXCHANGE_API_KEY`        | `""`                           | Exchange rate API key                |
 | `EXCHANGE_BASE_URL`       | `https://api.exchangerate-api.com/v4/latest` | Exchange rate API base URL |
 | `MPESA_CONSUMER_KEY`      | `""`                           | M-Pesa Daraja API consumer key       |
@@ -707,6 +707,49 @@ Configuration is managed via environment variables (loaded from a `.env` file). 
 | `MPESA_SHORTCODE`         | `174379`                       | M-Pesa business shortcode            |
 | `MPESA_ENVIRONMENT`       | `sandbox`                      | M-Pesa environment (`sandbox`/`production`) |
 | `UG_MOBILE_API_BASE_URL`  | `https://api.uganda-mobile.co.ug/v1` | Uganda mobile API base URL     |
+
+---
+
+## Lightning Network (LND) Setup
+
+InstaDoh settles payments over the **Bitcoin Lightning Network** using an [LND](https://github.com/lightningnetwork/lnd) node. LND acts as the instant settlement rail between the two mobile-money corridors. Because the app shows users only local-currency balances, Lightning is invisible to the end user — money simply appears instantly in their local currency.
+
+### Production topology
+
+In production there is **one LND node per corridor (country)**, connected by a Lightning channel between them:
+
+```
+M-Pesa (KE)  ⇄  KE LND node  ⚡ channel ⚡  UG LND node  ⇄  MTN/Airtel (UG)
+                 │                              │
+              local KES balances            local UGX balances
+```
+
+A sender pays in KES; the KE node pays a real bolt11 invoice created by the UG node; the UG instance credits the recipient's mobile money in UGX. Neither party ever sees or touches Bitcoin.
+
+### Quick start with a local node (testnet/regtest)
+
+The quickest way to get a working node for development is **[Polar](https://lightningpolar.com/)**:
+
+1. Install Polar, create a network, add two `lnd` nodes (e.g. `alice` + `bob`) on `regtest`.
+2. Add a Bitcoin Core node so the LND nodes can synchronize; open a channel between `alice` and `bob`.
+3. Point InstaDoh at `alice`:
+
+```dotenv
+LND_HOST=localhost:10001
+LND_TLS_CERT=/home/YOUR_USER/.polar/networks/1/volumes/lnd/alice/tls.cert
+LND_MACAROON=/home/YOUR_USER/.polar/networks/1/volumes/lnd/alice/data/chain/bitcoin/regtest/admin.macaroon
+```
+
+### Options for a real node
+
+| Option | Notes |
+|---|---|
+| Local LND (mainnet) | Full node on your server; paths under `~/.lnd/`. |
+| LND over Docker | Run `lnd` in a container, expose gRPC on `localhost:10009`. |
+| Hosted LND (e.g. Voltage.cloud) | No infra to run; TLS cert and admin macaroon are provided as files/hex. |
+| Polar (regtest) | Best for local development and integration testing. |
+
+> **Note:** the backend needs a **working** LND node for real Lightning operations. Without one it starts in "limited mode" and payment settlement is simulated.
 
 ---
 

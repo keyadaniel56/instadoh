@@ -1,8 +1,9 @@
 package main
 
 import (
-	"log"
+	"encoding/hex"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -15,8 +16,9 @@ import (
 	"instadoh-backend/middleware"
 	"instadoh-backend/services"
 
-	"github.com/gin-gonic/gin"
 	cors "github.com/gin-contrib/cors"
+	"github.com/gin-gonic/gin"
+	"github.com/lightningnetwork/lnd/lnrpc"
 )
 
 func main() {
@@ -76,6 +78,21 @@ func main() {
 
 	// Initialize payment service
 	paymentService := services.NewPaymentService(db, lndService, exchangeService, cfg)
+
+	// Subscribe to invoice settlements so that when money arrives over
+	// Lightning, the recipient's local-currency balance is credited instantly.
+	// The user never needs to know a Bitcoin transaction happened.
+	if lndService.IsConnected() {
+		lndService.SubscribeInvoiceSettlements(func(invoice *lnrpc.Invoice) {
+			paymentHash := hex.EncodeToString(invoice.RHash)
+			preimage := hex.EncodeToString(invoice.RPreimage)
+			if err := paymentService.HandleInvoiceSettled(paymentHash, preimage, invoice.AmtPaidMsat); err != nil {
+				log.Printf("WARNING: failed to credit settled invoice %s: %v", paymentHash, err)
+			}
+		})
+	} else {
+		log.Println("LND not connected, invoice settlement subscription disabled")
+	}
 
 	// Initialize cross-border service
 	crossBorderService := services.NewCrossBorderService(
