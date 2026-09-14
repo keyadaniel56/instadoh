@@ -7,6 +7,12 @@ export const crossBorderApi = {
     })
   },
 
+  resolveRecipient(email) {
+    return client.get('/v1/cross-border/resolve', {
+      params: { email },
+    })
+  },
+
   sendCrossBorder(data) {
     return client.post('/v1/cross-border/send', data)
   },

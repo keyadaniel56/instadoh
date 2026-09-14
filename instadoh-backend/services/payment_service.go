@@ -1,11 +1,13 @@
 package services
 
 import (
+	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
 	"math"
+	"strings"
 	"time"
 
 	"instadoh-backend/config"
@@ -20,15 +22,17 @@ type PaymentService struct {
 	db              *gorm.DB
 	lnd             *LNDService
 	exchangeService *ExchangeService
+	lnAddress       *LightningAddressService
 	cfg             *config.Config
 }
 
 // NewPaymentService creates a new payment service
-func NewPaymentService(db *gorm.DB, lnd *LNDService, exchangeService *ExchangeService, cfg *config.Config) *PaymentService {
+func NewPaymentService(db *gorm.DB, lnd *LNDService, exchangeService *ExchangeService, lnAddress *LightningAddressService, cfg *config.Config) *PaymentService {
 	return &PaymentService{
 		db:              db,
 		lnd:             lnd,
 		exchangeService: exchangeService,
+		lnAddress:       lnAddress,
 		cfg:             cfg,
 	}
 }
@@ -321,6 +325,405 @@ func (s *PaymentService) GetBalance(userID uint) (*types.BalanceResponse, error)
 	}, nil
 }
 
+// ResolveRecipient looks up an InstaDoh user by email and returns the info a
+// sender needs to preview/confirm a payment to that user. The recipient's email
+// is the universal identifier for sending money — no phone number required.
+func (s *PaymentService) ResolveRecipient(email string) (*models.User, error) {
+	if email == "" {
+		return nil, fmt.Errorf("recipient email is required")
+	}
+
+	var user models.User
+	if err := s.db.Where("email = ?", email).First(&user).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, fmt.Errorf("no InstaDoh user found with email %s", email)
+		}
+		return nil, fmt.Errorf("failed to look up recipient: %w", err)
+	}
+
+	if !user.IsActive {
+		return nil, fmt.Errorf("recipient account is deactivated")
+	}
+
+	return &user, nil
+}
+
+// SendByEmail sends money to another InstaDoh user identified by their email
+// address. The email is the universal, country-agnostic identifier — the
+// sender never needs a phone number, and the recipient's local currency and
+// country come from their account profile.
+func (s *PaymentService) SendByEmail(senderID uint, req *types.SendByEmailRequest) (*models.Transaction, error) {
+	recipient, err := s.ResolveRecipient(req.RecipientEmail)
+	if err != nil {
+		return nil, err
+	}
+	if recipient.ID == senderID {
+		return nil, fmt.Errorf("you cannot send money to yourself")
+	}
+	return s.internalTransfer(senderID, recipient.Email, req.Amount, req.Currency, req.Description)
+}
+
+// internalTransfer atomically debits one InstaDoh user and credits another, in
+// the recipient's local currency. Used for email-to-email sends and internal
+// Lightning Address pays. Reuses the underlying exchange rates for conversion.
+func (s *PaymentService) internalTransfer(senderID uint, recipientEmail string, amount float64, currency, description string) (*models.Transaction, error) {
+	sender, err := s.getUserByID(senderID)
+	if err != nil {
+		return nil, fmt.Errorf("sender not found: %w", err)
+	}
+
+	recipient, err := s.ResolveRecipient(recipientEmail)
+	if err != nil {
+		return nil, err
+	}
+
+	if sender.Email == recipient.Email {
+		return nil, fmt.Errorf("you cannot send money to yourself")
+	}
+
+	// Validate sender's currency matches request
+	if sender.Currency != currency {
+		return nil, fmt.Errorf("you have %s balance, not %s", sender.Currency, currency)
+	}
+
+	// Check balance (including 2% fee)
+	fee := math.Round(amount*0.02*100) / 100
+	totalDeduction := amount + fee
+	if sender.Balance < totalDeduction {
+		return nil, fmt.Errorf("insufficient balance: have %.2f %s, need %.2f %s (including %.2f fee)",
+			sender.Balance, sender.Currency, totalDeduction, sender.Currency, fee)
+	}
+
+	// Convert the send amount into the recipient's currency.
+	var receiveAmount float64
+	if sender.Currency == recipient.Currency {
+		receiveAmount = amount
+	} else {
+		usdValue, err := s.exchangeService.Convert(amount, sender.Currency, "USD")
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert %s to USD: %w", sender.Currency, err)
+		}
+		receiveAmount, err = s.exchangeService.Convert(usdValue, "USD", recipient.Currency)
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert USD to %s: %w", recipient.Currency, err)
+		}
+	}
+	receiveAmount = math.Round(receiveAmount*100) / 100
+
+	amountMsat, err := s.fiatToMsat(amount, sender.Currency)
+	if err != nil {
+		return nil, err
+	}
+
+	// Generate a settlement hash representing the Lightning leg.
+	paymentHash := make([]byte, 32)
+	if _, err := rand.Read(paymentHash); err != nil {
+		return nil, fmt.Errorf("failed to generate settlement hash: %w", err)
+	}
+	paymentHashHex := hex.EncodeToString(paymentHash)
+	now := time.Now()
+
+	// Atomically debit the sender and credit the recipient.
+	var sentTx *models.Transaction
+	txErr := s.db.Transaction(func(dbTx *gorm.DB) error {
+		// Sender's outgoing transaction
+		sent := &models.Transaction{
+			UserID:       sender.ID,
+			Amount:       amount,
+			Currency:     sender.Currency,
+			AmountBTC:    amountMsat,
+			Direction:    types.DirectionOutgoing,
+			Status:       types.TxStatusCompleted,
+			PaymentHash:  paymentHashHex,
+			Counterparty: recipient.Email,
+			Description:  description,
+			FeeMsat:      int64(float64(amountMsat) * 0.02),
+			SettledAt:    &now,
+		}
+		if err := dbTx.Create(sent).Error; err != nil {
+			return fmt.Errorf("failed to record outgoing transaction: %w", err)
+		}
+
+		// Recipient's incoming transaction
+		received := &models.Transaction{
+			UserID:         recipient.ID,
+			Amount:         receiveAmount,
+			Currency:       recipient.Currency,
+			AmountBTC:      amountMsat,
+			Direction:      types.DirectionIncoming,
+			Status:         types.TxStatusCompleted,
+			PaymentHash:    paymentHashHex,
+			CounterpartyID: uintPtr(sender.ID),
+			Counterparty:   sender.Email,
+			Description:    description,
+			SettledAt:      &now,
+		}
+		if err := dbTx.Create(received).Error; err != nil {
+			return fmt.Errorf("failed to record incoming transaction: %w", err)
+		}
+
+		// Debit sender (amount + fee)
+		if err := dbTx.Model(&models.User{}).Where("id = ?", sender.ID).
+			Update("balance", gorm.Expr("balance - ?", totalDeduction)).Error; err != nil {
+			return fmt.Errorf("failed to debit sender balance: %w", err)
+		}
+
+		// Credit recipient
+		if err := dbTx.Model(&models.User{}).Where("id = ?", recipient.ID).
+			Update("balance", gorm.Expr("balance + ?", receiveAmount)).Error; err != nil {
+			return fmt.Errorf("failed to credit recipient balance: %w", err)
+		}
+
+		sentTx = sent
+		return nil
+	})
+
+	if txErr != nil {
+		return nil, txErr
+	}
+
+	log.Printf("Internal payment completed: sender=%d (%s) -> recipient=%s (%s) amount=%.2f %s received=%.2f %s fee=%.2f %s",
+		sender.ID, sender.Email, recipient.Email, recipient.Currency,
+		amount, sender.Currency, receiveAmount, recipient.Currency, fee, sender.Currency)
+
+	return sentTx, nil
+}
+
+// WithdrawToLightning pays out a user's local-currency balance to any Lightning
+// destination in the world: a BOLT11 invoice or a Lightning Address
+// (alice@example.com). This is the global cash-out path that replaces the need
+// for a mobile money provider — anyone with a Lightning wallet is reachable.
+func (s *PaymentService) WithdrawToLightning(userID uint, req *types.WithdrawRequest) (*models.Transaction, error) {
+	user, err := s.getUserByID(userID)
+	if err != nil {
+		return nil, fmt.Errorf("user not found: %w", err)
+	}
+
+	if user.Currency != req.Currency {
+		return nil, fmt.Errorf("you have %s balance, not %s", user.Currency, req.Currency)
+	}
+
+	dest := strings.TrimSpace(req.Destination)
+	if dest == "" {
+		return nil, fmt.Errorf("destination is required")
+	}
+
+	// Internal InstaDoh Lightning Address -> direct account credit, no network
+	// payment needed (a node cannot pay its own invoices).
+	if IsLightningAddress(dest) && s.lnAddress.IsInternalAddress(dest) {
+		if req.Amount <= 0 {
+			return nil, fmt.Errorf("amount is required when withdrawing to an InstaDoh address")
+		}
+		var recipient models.User
+		if err := s.db.Where("LOWER(ln_address) = LOWER(?)", dest).First(&recipient).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, fmt.Errorf("no InstaDoh user found for lightning address %s", dest)
+			}
+			return nil, fmt.Errorf("failed to look up recipient: %w", err)
+		}
+		return s.internalTransfer(userID, recipient.Email, req.Amount, req.Currency, req.Description)
+	}
+
+	// Resolve the destination to a concrete BOLT11 invoice before paying.
+	bolt11 := ""
+	var decoded *DecodedPaymentRequest
+	if IsBolt11Invoice(dest) {
+		bolt11 = dest
+		decoded, err = s.lnd.DecodePaymentRequest(bolt11)
+		if err != nil {
+			return nil, fmt.Errorf("invalid payment request: %w", err)
+		}
+	} else if IsLightningAddress(dest) {
+		// Need a msat amount before we can fetch the address's invoice.
+		amountMsat, convertErr := s.fiatToMsat(req.Amount, req.Currency)
+		if convertErr != nil {
+			return nil, convertErr
+		}
+		bolt11, err = s.lnAddress.FetchLnurlInvoice(dest, amountMsat, req.Description)
+		if err != nil {
+			return nil, err
+		}
+		decoded, err = s.lnd.DecodePaymentRequest(bolt11)
+		if err != nil {
+			return nil, fmt.Errorf("invalid invoice from %s: %w", dest, err)
+		}
+	} else {
+		return nil, fmt.Errorf("destination must be a BOLT11 invoice or a Lightning Address")
+	}
+
+	// Determine the amount to pay. Fixed-amount invoices win; otherwise use the
+	// user-specified amount in their local currency.
+	var amountMsat int64
+	var amountInCurrency float64
+	if decoded.AmountMsat > 0 {
+		amountMsat = decoded.AmountMsat
+		amountInCurrency, err = s.msatToFiat(amountMsat, req.Currency)
+		if err != nil {
+			return nil, err
+		}
+		amountInCurrency = math.Round(amountInCurrency*100) / 100
+	} else {
+		if req.Amount <= 0 {
+			return nil, fmt.Errorf("amount is required for this invoice")
+		}
+		amountMsat, err = s.fiatToMsat(req.Amount, req.Currency)
+		if err != nil {
+			return nil, err
+		}
+		amountInCurrency = req.Amount
+	}
+
+	if amountMsat <= 0 {
+		return nil, fmt.Errorf("amount too small after conversion")
+	}
+
+	// Check balance for the resolved amount.
+	if user.Balance < amountInCurrency {
+		return nil, fmt.Errorf("insufficient balance: have %.2f %s, need %.2f %s",
+			user.Balance, user.Currency, amountInCurrency, req.Currency)
+	}
+
+	// Execute the Lightning payment.
+	resp, err := s.lnd.PayInvoice(bolt11, amountMsat)
+	if err != nil {
+		return nil, fmt.Errorf("payment failed: %w", err)
+	}
+
+	paymentHash := hex.EncodeToString(resp.PaymentHash)
+	preimage := hex.EncodeToString(resp.Preimage)
+	now := time.Now()
+
+	var savedTx *models.Transaction
+	txErr := s.db.Transaction(func(dbTx *gorm.DB) error {
+		if err := dbTx.Model(&models.User{}).Where("id = ?", user.ID).
+			Update("balance", gorm.Expr("balance - ?", amountInCurrency)).Error; err != nil {
+			return fmt.Errorf("failed to update balance: %w", err)
+		}
+
+		tx := &models.Transaction{
+			UserID:         user.ID,
+			Amount:         amountInCurrency,
+			Currency:       req.Currency,
+			AmountBTC:      amountMsat,
+			Direction:      types.DirectionOutgoing,
+			Status:         types.TxStatusCompleted,
+			PaymentHash:    paymentHash,
+			PaymentRequest: bolt11,
+			Preimage:       preimage,
+			Counterparty:   decoded.Destination,
+			Description:    req.Description,
+			FeeMsat:        resp.FeeMsat,
+			SettledAt:      &now,
+		}
+		if err := dbTx.Create(tx).Error; err != nil {
+			return fmt.Errorf("failed to save transaction: %w", err)
+		}
+		savedTx = tx
+		return nil
+	})
+	if txErr != nil {
+		return nil, txErr
+	}
+
+	log.Printf("Lightning withdrawal completed: user=%d dest=%s amount=%.2f %s msat=%d",
+		user.ID, dest, amountInCurrency, req.Currency, amountMsat)
+
+	return savedTx, nil
+}
+
+// fiatToMsat converts an amount in the given currency into millisatoshis.
+func (s *PaymentService) fiatToMsat(amount float64, currency string) (int64, error) {
+	btcPrice, err := s.exchangeService.GetBTCUSDPrice()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get BTC price: %w", err)
+	}
+	var usdAmount float64
+	if currency == "USD" {
+		usdAmount = amount
+	} else {
+		rate, err := s.exchangeService.GetRate(currency)
+		if err != nil {
+			return 0, fmt.Errorf("failed to get rate for %s: %w", currency, err)
+		}
+		usdAmount = amount / rate
+	}
+	msat := int64((usdAmount / btcPrice) * 1e11)
+	if msat <= 0 {
+		return 0, fmt.Errorf("amount too small after conversion")
+	}
+	return msat, nil
+}
+
+// msatToFiat converts millisatoshis back into the given currency.
+func (s *PaymentService) msatToFiat(msat int64, currency string) (float64, error) {
+	btcPrice, err := s.exchangeService.GetBTCUSDPrice()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get BTC price: %w", err)
+	}
+	usdValue := float64(msat) / 1e11 * btcPrice
+	if currency == "USD" {
+		return usdValue, nil
+	}
+	rate, err := s.exchangeService.GetRate(currency)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get rate for %s: %w", currency, err)
+	}
+	return usdValue * rate, nil
+}
+
+// CreateLNURLPInvoice creates a Lightning invoice for an inbound payment
+// initiated via a Lightning Address (lnurl-pay). The amount is in millisatoshis
+// exactly as requested by the payer; the user's local-currency amount that will
+// be credited on settlement is derived from the current exchange rate.
+func (s *PaymentService) CreateLNURLPInvoice(userID uint, amountMsat int64, comment string) (*types.InvoiceResponse, error) {
+	user, err := s.getUserByID(userID)
+	if err != nil {
+		return nil, fmt.Errorf("user not found: %w", err)
+	}
+
+	fiatAmount, err := s.msatToFiat(amountMsat, user.Currency)
+	if err != nil {
+		return nil, err
+	}
+	fiatAmount = math.Round(fiatAmount*100) / 100
+	if fiatAmount <= 0 {
+		return nil, fmt.Errorf("amount too small to credit in %s", user.Currency)
+	}
+
+	lnInvoice, err := s.lnd.CreateInvoice(amountMsat, comment, 3600)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create lightning invoice: %w", err)
+	}
+
+	paymentHash := hex.EncodeToString(lnInvoice.RHash)
+	tx := &models.Transaction{
+		UserID:         user.ID,
+		Amount:         fiatAmount,
+		Currency:       user.Currency,
+		AmountBTC:      amountMsat,
+		Direction:      types.DirectionIncoming,
+		Status:         types.TxStatusPending,
+		PaymentHash:    paymentHash,
+		PaymentRequest: lnInvoice.PaymentRequest,
+		Description:    comment,
+	}
+
+	if err := s.db.Create(tx).Error; err != nil {
+		return nil, fmt.Errorf("failed to save transaction: %w", err)
+	}
+
+	return &types.InvoiceResponse{
+		ID:             tx.ID,
+		PaymentRequest: lnInvoice.PaymentRequest,
+		Amount:         fiatAmount,
+		Currency:       user.Currency,
+		Description:    comment,
+		Status:         string(tx.Status),
+		ExpiresAt:      time.Now().Add(1 * time.Hour),
+		CreatedAt:      tx.CreatedAt,
+	}, nil
+}
+
 // HandleInvoiceSettled processes a webhook or subscription notification that an
 // invoice was settled. It credits the recipient's local-currency balance the
 // instant settlement is detected. Idempotent: already-completed transactions are
@@ -412,4 +815,8 @@ func (s *PaymentService) getUserByID(userID uint) (*models.User, error) {
 
 func timePtr(t time.Time) *time.Time {
 	return &t
+}
+
+func uintPtr(v uint) *uint {
+	return &v
 }

@@ -402,14 +402,14 @@
 						],
 						"body": {
 							"mode": "raw",
-							"raw": "{\n  \"recipient_phone\": \"256772123456\",\n  \"recipient_country\": \"UG\",\n  \"amount\": 1000,\n  \"currency\": \"KES\",\n  \"description\": \"school fees\"\n}"
+							"raw": "{\n  \"recipient_email\": \"bob@example.com\",\n  \"recipient_country\": \"UG\",\n  \"amount\": 1000,\n  \"currency\": \"KES\",\n  \"description\": \"school fees\"\n}"
 						},
 						"url": {
 							"raw": "{{baseUrl}}/cross-border/send",
 							"host": ["{{baseUrl}}"],
 							"path": ["cross-border", "send"]
 						},
-						"description": "Send from KE to a UG phone (or vice versa). Deducts sender balance + 2% fee, executes the Lightning leg, and pays out to the recipient's mobile money. Works without LND in limited mode."
+						"description": "Send from KE to a UG InstaDoh user by email. Deducts sender balance + 2% fee, executes the Lightning leg, and credits the recipient's local-currency balance. No phone number or mobile money account needed on the receiving side."
 					},
 					"response": []
 				},

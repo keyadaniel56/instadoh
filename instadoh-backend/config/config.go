@@ -15,8 +15,16 @@ type Config struct {
 	LND          LNDConfig
 	Exchange     ExchangeConfig
 	JWT          JWTConfig
+	App          AppConfig
 	Mpesa        MpesaConfig
 	UgandaMobile UgandaMobileConfig
+}
+
+// AppConfig holds global application settings used to advertise the
+// Lightning Address host and callbacks.
+type AppConfig struct {
+	BaseURL      string // public base URL, e.g. https://instadoh.com
+	LNURLDomain  string // domain used for user Lightning Addresses, e.g. instadoh.com
 }
 
 type ServerConfig struct {
@@ -117,6 +125,10 @@ func Load() *Config {
 		JWT: JWTConfig{
 			Secret:     getEnv("JWT_SECRET", "change-me-in-production"),
 			Expiration: getEnvInt("JWT_EXPIRATION_HOURS", 24),
+		},
+		App: AppConfig{
+			BaseURL:     getEnv("APP_BASE_URL", "http://localhost:8080"),
+			LNURLDomain: getEnv("LN_URL_DOMAIN", "instadoh.com"),
 		},
 		Mpesa: MpesaConfig{
 			ConsumerKey:    getEnv("MPESA_CONSUMER_KEY", ""),

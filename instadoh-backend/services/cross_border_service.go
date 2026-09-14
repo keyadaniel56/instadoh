@@ -47,14 +47,11 @@ func NewCrossBorderService(
 }
 
 // QuoteForTransfer provides a quote for a cross-border transfer
-// fromCurrency: KES or UGX
-// toCurrency: KES (if sending to Kenya) or UGX (if sending to Uganda)
+// fromCurrency: any supported currency (e.g., KES, UGX, USD)
+// toCurrency: the recipient's currency (e.g., KES, UGX, USD)
 func (s *CrossBorderService) QuoteForTransfer(fromCurrency, toCurrency string, amount float64) (*types.CrossBorderQuote, error) {
-	if fromCurrency != "KES" && fromCurrency != "UGX" {
-		return nil, fmt.Errorf("fromCurrency must be KES or UGX")
-	}
-	if toCurrency != "KES" && toCurrency != "UGX" {
-		return nil, fmt.Errorf("toCurrency must be KES or UGX")
+	if fromCurrency == "" || toCurrency == "" {
+		return nil, fmt.Errorf("fromCurrency and toCurrency are required")
 	}
 	if fromCurrency == toCurrency {
 		return nil, fmt.Errorf("fromCurrency and toCurrency must be different")
@@ -129,10 +126,38 @@ func (s *CrossBorderService) QuoteForTransfer(fromCurrency, toCurrency string, a
 	}, nil
 }
 
+// ResolveRecipient looks up an InstaDoh user by email and returns their
+// profile. The email is the universal identifier for sending money — no phone
+// number required — and the recipient's country/currency come from their account.
+func (s *CrossBorderService) ResolveRecipient(email string) (*models.User, error) {
+	if email == "" {
+		return nil, fmt.Errorf("recipient email is required")
+	}
+
+	var user models.User
+	if err := s.db.Where("email = ?", email).First(&user).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, fmt.Errorf("no InstaDoh user found with email %s", email)
+		}
+		return nil, fmt.Errorf("failed to look up recipient: %w", err)
+	}
+
+	if !user.IsActive {
+		return nil, fmt.Errorf("recipient account is deactivated")
+	}
+
+	return &user, nil
+}
+
 // SendCrossBorderPayment handles the end-to-end cross-border payment
-// 1. Deducts from sender's wallet balance
-// 2. Routes through Lightning Network for instant settlement
-// 3. Sends to recipient via their local mobile money
+// 1. Looks up the recipient by email (their InstaDoh account)
+// 2. Deducts from sender's wallet balance
+// 3. Routes through Lightning Network for instant settlement
+// 4. Credits the recipient's local-currency balance
+//
+// The recipient's email is the universal identifier — no phone number or
+// mobile money account is needed on the receiving side. Their country and
+// currency come from their InstaDoh profile.
 func (s *CrossBorderService) SendCrossBorderPayment(senderID uint, req *types.CrossBorderSendRequest) (*models.CrossBorderTransaction, error) {
 	// Get sender user
 	var sender models.User
@@ -145,6 +170,18 @@ func (s *CrossBorderService) SendCrossBorderPayment(senderID uint, req *types.Cr
 		return nil, fmt.Errorf("sender has %s balance, not %s", sender.Currency, req.Currency)
 	}
 
+	// Resolve the recipient by email
+	var recipient models.User
+	if err := s.db.Where("email = ?", req.RecipientEmail).First(&recipient).Error; err != nil {
+		return nil, fmt.Errorf("no InstaDoh user found with email %s", req.RecipientEmail)
+	}
+	if !recipient.IsActive {
+		return nil, fmt.Errorf("recipient account is deactivated")
+	}
+	if recipient.ID == sender.ID {
+		return nil, fmt.Errorf("you cannot send money to yourself")
+	}
+
 	// Check balance (including fee)
 	quotedFee := math.Round(req.Amount*0.02*100) / 100
 	totalDeduction := req.Amount + quotedFee
@@ -154,22 +191,10 @@ func (s *CrossBorderService) SendCrossBorderPayment(senderID uint, req *types.Cr
 			sender.Balance, sender.Currency, totalDeduction, sender.Currency, quotedFee)
 	}
 
-	// Validate recipient country
-	if req.RecipientCountry != "KE" && req.RecipientCountry != "UG" {
-		return nil, fmt.Errorf("recipient country must be KE or UG")
-	}
-
-	// Determine target currency
-	receiveCurrency := "KES"
-	if req.RecipientCountry == "UG" {
-		receiveCurrency = "UGX"
-	}
-
-	// Prevent sending to same country (use regular mobile money for that)
-	senderCountry := sender.CountryCode
-	if senderCountry == req.RecipientCountry {
-		return nil, fmt.Errorf("cannot send cross-border to the same country. Use mobile money deposit/withdrawal for domestic transfers")
-	}
+	// Determine target currency and derive the recipient country from the
+	// recipient's profile instead of a phone number
+	receiveCurrency := recipient.Currency
+	recipientCountry := recipient.CountryCode
 
 	// Get quote for the transfer
 	quote, err := s.QuoteForTransfer(req.Currency, receiveCurrency, req.Amount)
@@ -203,6 +228,7 @@ func (s *CrossBorderService) SendCrossBorderPayment(senderID uint, req *types.Cr
 	if _, err := rand.Read(paymentHash); err != nil {
 		return nil, fmt.Errorf("failed to generate settlement hash: %w", err)
 	}
+	paymentHashHex := hex.EncodeToString(paymentHash)
 
 	// Create a transaction record for the Lightning leg
 	lightningTx := &models.Transaction{
@@ -212,8 +238,9 @@ func (s *CrossBorderService) SendCrossBorderPayment(senderID uint, req *types.Cr
 		AmountBTC:    amountMsat,
 		Direction:    types.DirectionOutgoing,
 		Status:       types.TxStatusPending,
-		PaymentHash:  hex.EncodeToString(paymentHash),
-		Description:  fmt.Sprintf("Cross-border to %s (%s)", req.RecipientCountry, req.RecipientPhone),
+		PaymentHash:  paymentHashHex,
+		Counterparty: recipient.Email,
+		Description:  fmt.Sprintf("Cross-border to %s (%s)", recipientCountry, recipient.Email),
 		ExchangeRate: quote.ExchangeRate,
 	}
 
@@ -221,120 +248,90 @@ func (s *CrossBorderService) SendCrossBorderPayment(senderID uint, req *types.Cr
 		return nil, fmt.Errorf("failed to create lightning transaction: %w", err)
 	}
 
-	// Step 3: Send the converted amount to the recipient via mobile money
-	// Create cross-border transaction record
+	// Create the recipient's incoming transaction record for the same
+	// settlement hash so both parties share a native transaction history
+	now := time.Now()
+	recipientTx := &models.Transaction{
+		UserID:         recipient.ID,
+		Amount:         quote.ReceiveAmount,
+		Currency:       receiveCurrency,
+		AmountBTC:      amountMsat,
+		Direction:      types.DirectionIncoming,
+		Status:         types.TxStatusPending,
+		PaymentHash:    paymentHashHex,
+		CounterpartyID: uintPtr(sender.ID),
+		Counterparty:   sender.Email,
+		Description:    req.Description,
+		ExchangeRate:   quote.ExchangeRate,
+	}
+	if err := s.db.Create(recipientTx).Error; err != nil {
+		return nil, fmt.Errorf("failed to create recipient transaction: %w", err)
+	}
+
+	// Step 3: Create cross-border transaction record
 	cbTx := &models.CrossBorderTransaction{
-		SenderID:        senderID,
-		ReceiverPhone:   req.RecipientPhone,
-		ReceiverCountry: req.RecipientCountry,
-		SendAmount:      req.Amount,
-		SendCurrency:    req.Currency,
-		ReceiveAmount:   quote.ReceiveAmount,
+		SenderID:       senderID,
+		ReceiverEmail:  recipient.Email,
+		ReceiverPhone:  recipient.Phone,
+		ReceiverCountry: recipientCountry,
+		SendAmount:     req.Amount,
+		SendCurrency:   req.Currency,
+		ReceiveAmount:  quote.ReceiveAmount,
 		ReceiveCurrency: receiveCurrency,
-		ExchangeRate:    quote.ExchangeRate,
-		Fee:             quotedFee,
-		Status:          "pending",
-		LightningTxID:   fmt.Sprintf("%d", lightningTx.ID),
-		Description:     req.Description,
+		ExchangeRate:   quote.ExchangeRate,
+		Fee:            quotedFee,
+		Status:         "pending",
+		LightningTxID:  fmt.Sprintf("%d", lightningTx.ID),
+		Description:    req.Description,
 	}
 
 	if err := s.db.Create(cbTx).Error; err != nil {
 		return nil, fmt.Errorf("failed to create cross-border transaction: %w", err)
 	}
 
-	// Step 4: Initiate payout via mobile money in recipient's country
-	var mobileTxID uint
-	switch req.RecipientCountry {
-	case "KE":
-		// Send money to Kenyan phone via M-Pesa B2C
-		withdrawResp, err := s.mpesaService.InitiateB2CPayment(
-			req.RecipientPhone,
-			quote.ReceiveAmount,
-			fmt.Sprintf("InstaDoh cross-border transfer from %s", sender.FullName),
-		)
-		if err != nil {
-			log.Printf("Warning: M-Pesa B2C failed, will retry: %v", err)
-			cbTx.Status = "pending_mobile_payout"
-		} else {
-			// Record mobile money transaction
-			mmTx := &models.MobileMoneyTransaction{
-				UserID:        senderID,
-				Type:          "withdrawal",
-				Provider:      types.MMProviderMpesa,
-				ProviderRef:   withdrawResp.ConversationID,
-				PhoneNumber:   req.RecipientPhone,
-				Amount:        quote.ReceiveAmount,
-				Currency:      "KES",
-				Status:        types.MMStatusPending,
-				TransactionID: lightningTx.ID,
-			}
-			if err := s.db.Create(mmTx).Error; err != nil {
-				log.Printf("Warning: failed to save mobile money tx: %v", err)
-			} else {
-				mobileTxID = mmTx.ID
-				cbTx.MobileTxID = mobileTxID
-				cbTx.Status = "completed"
-				now := time.Now()
-				cbTx.CompletedAt = &now
-			}
+	// Step 4: Settle atomically — debit sender (amount + fee) and credit
+	// recipient. Because the recipient holds an InstaDoh account, no mobile
+	// money payout is needed; the funds land straight in their wallet balance.
+	settleErr := s.db.Transaction(func(dbTx *gorm.DB) error {
+		if err := dbTx.Model(&models.User{}).Where("id = ?", sender.ID).
+			Update("balance", gorm.Expr("balance - ?", totalDeduction)).Error; err != nil {
+			return fmt.Errorf("failed to update sender balance: %w", err)
 		}
 
-	case "UG":
-		// Send money to Ugandan phone via mobile money
-		provider := "mtn" // default to MTN, could be configurable
-		withdrawResp, err := s.ugandaService.InitiateWithdrawal(
-			provider,
-			req.RecipientPhone,
-			quote.ReceiveAmount,
-			fmt.Sprintf("CB-%d", cbTx.ID),
-		)
-		if err != nil {
-			log.Printf("Warning: Uganda mobile withdrawal failed, will retry: %v", err)
-			cbTx.Status = "pending_mobile_payout"
-		} else {
-			mmTx := &models.MobileMoneyTransaction{
-				UserID:        senderID,
-				Type:          "withdrawal",
-				Provider:      types.MMProviderUgandaMobile,
-				ProviderRef:   withdrawResp.TransactionID,
-				PhoneNumber:   req.RecipientPhone,
-				Amount:        quote.ReceiveAmount,
-				Currency:      "UGX",
-				Status:        types.MMStatusPending,
-				TransactionID: lightningTx.ID,
-			}
-			if err := s.db.Create(mmTx).Error; err != nil {
-				log.Printf("Warning: failed to save mobile money tx: %v", err)
-			} else {
-				mobileTxID = mmTx.ID
-				cbTx.MobileTxID = mobileTxID
-				cbTx.Status = "completed"
-				now := time.Now()
-				cbTx.CompletedAt = &now
-			}
+		if err := dbTx.Model(&models.User{}).Where("id = ?", recipient.ID).
+			Update("balance", gorm.Expr("balance + ?", quote.ReceiveAmount)).Error; err != nil {
+			return fmt.Errorf("failed to credit recipient balance: %w", err)
 		}
+
+		// Update the lightning transaction as completed
+		lightningTx.Status = types.TxStatusCompleted
+		lightningTx.SettledAt = &now
+		if err := dbTx.Save(lightningTx).Error; err != nil {
+			return fmt.Errorf("failed to update lightning tx status: %w", err)
+		}
+
+		// Update the recipient's transaction as completed
+		recipientTx.Status = types.TxStatusCompleted
+		recipientTx.SettledAt = &now
+		if err := dbTx.Save(recipientTx).Error; err != nil {
+			return fmt.Errorf("failed to update recipient tx status: %w", err)
+		}
+
+		// Update cross-border transaction
+		cbTx.Status = "completed"
+		cbTx.CompletedAt = &now
+		if err := dbTx.Save(cbTx).Error; err != nil {
+			return fmt.Errorf("failed to update cross-border transaction: %w", err)
+		}
+
+		return nil
+	})
+	if settleErr != nil {
+		return nil, settleErr
 	}
 
-	// Step 5: Deduct from sender's balance (including fee)
-	if err := s.db.Model(&sender).Update("balance", gorm.Expr("balance - ?", totalDeduction)).Error; err != nil {
-		return nil, fmt.Errorf("failed to update sender balance: %w", err)
-	}
-
-	// Update the lightning transaction as completed
-	lightningTx.Status = types.TxStatusCompleted
-	settledAt := time.Now()
-	lightningTx.SettledAt = &settledAt
-	if err := s.db.Save(lightningTx).Error; err != nil {
-		log.Printf("Warning: failed to update lightning tx status: %v", err)
-	}
-
-	// Update cross-border transaction
-	if err := s.db.Save(cbTx).Error; err != nil {
-		return nil, fmt.Errorf("failed to update cross-border transaction: %w", err)
-	}
-
-	log.Printf("Cross-border payment completed: sender=%d (%.2f %s) → recipient=%s (%.2f %s) fee=%.2f %s",
-		senderID, req.Amount, req.Currency, req.RecipientPhone,
+	log.Printf("Cross-border payment completed: sender=%d (%.2f %s) -> recipient=%s (%s) received=%.2f %s fee=%.2f %s",
+		senderID, req.Amount, req.Currency, recipient.Email, recipientCountry,
 		quote.ReceiveAmount, receiveCurrency, quotedFee, req.Currency)
 
 	return cbTx, nil

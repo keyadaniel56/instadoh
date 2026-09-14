@@ -63,6 +63,35 @@ func (h *CrossBorderHandler) GetQuote(c *gin.Context) {
 	c.JSON(http.StatusOK, quote)
 }
 
+// ResolveRecipient looks up a recipient by email before initiating a payment
+// GET /api/v1/cross-border/resolve?email=bob@example.com
+func (h *CrossBorderHandler) ResolveRecipient(c *gin.Context) {
+	email := c.Query("email")
+	if email == "" {
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{
+			Code:    http.StatusBadRequest,
+			Message: "email is required",
+		})
+		return
+	}
+
+	recipient, err := h.crossBorderService.ResolveRecipient(email)
+	if err != nil {
+		c.JSON(http.StatusNotFound, types.ErrorResponse{
+			Code:    http.StatusNotFound,
+			Message: err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"email":        recipient.Email,
+		"full_name":    recipient.FullName,
+		"country_code": recipient.CountryCode,
+		"currency":     recipient.Currency,
+	})
+}
+
 // SendCrossBorder initiates a cross-border payment
 // POST /api/v1/cross-border/send
 func (h *CrossBorderHandler) SendCrossBorder(c *gin.Context) {

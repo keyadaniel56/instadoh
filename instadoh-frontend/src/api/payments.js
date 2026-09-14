@@ -27,6 +27,24 @@ export const paymentsApi = {
     return client.post('/v1/payments/send', data)
   },
 
+  sendByEmail(data) {
+    return client.post('/v1/payments/send-by-email', data)
+  },
+
+  withdraw(data) {
+    return client.post('/v1/payments/withdraw', data)
+  },
+
+  resolveRecipient(email) {
+    return client.get('/v1/payments/resolve', {
+      params: { email },
+    })
+  },
+
+  getConfig() {
+    return client.get('/v1/config')
+  },
+
   getRates(currency = 'USD') {
     return client.get('/v1/payments/rates', {
       params: { currency },

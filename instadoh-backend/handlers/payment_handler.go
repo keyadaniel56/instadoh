@@ -97,6 +97,110 @@ func (h *PaymentHandler) SendPayment(c *gin.Context) {
 	c.JSON(http.StatusOK, tx)
 }
 
+// ResolveRecipient looks up a recipient by email before sending money
+// GET /api/v1/payments/resolve?email=bob@example.com
+func (h *PaymentHandler) ResolveRecipient(c *gin.Context) {
+	email := c.Query("email")
+	if email == "" {
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{
+			Code:    http.StatusBadRequest,
+			Message: "email is required",
+		})
+		return
+	}
+
+	recipient, err := h.paymentService.ResolveRecipient(email)
+	if err != nil {
+		c.JSON(http.StatusNotFound, types.ErrorResponse{
+			Code:    http.StatusNotFound,
+			Message: err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"email":        recipient.Email,
+		"full_name":    recipient.FullName,
+		"country_code": recipient.CountryCode,
+		"currency":     recipient.Currency,
+	})
+}
+
+// SendByEmail sends money to another InstaDoh user by email
+// POST /api/v1/payments/send-by-email
+func (h *PaymentHandler) SendByEmail(c *gin.Context) {
+	userID, err := middleware.GetUserID(c)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, types.ErrorResponse{
+			Code:    http.StatusUnauthorized,
+			Message: "Authentication required",
+		})
+		return
+	}
+
+	var req types.SendByEmailRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{
+			Code:    http.StatusBadRequest,
+			Message: "Invalid request: " + err.Error(),
+		})
+		return
+	}
+
+	tx, err := h.paymentService.SendByEmail(userID, &req)
+	if err != nil {
+		code := http.StatusBadRequest
+		if len(err.Error()) >= 20 && err.Error()[:20] == "insufficient balance" {
+			code = http.StatusPaymentRequired
+		}
+		c.JSON(code, types.ErrorResponse{
+			Code:    code,
+			Message: err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, tx)
+}
+
+// WithdrawLightning pays out a user's balance to any Lightning destination
+// (BOLT11 invoice or Lightning Address) — the global cash-out path.
+// POST /api/v1/payments/withdraw
+func (h *PaymentHandler) WithdrawLightning(c *gin.Context) {
+	userID, err := middleware.GetUserID(c)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, types.ErrorResponse{
+			Code:    http.StatusUnauthorized,
+			Message: "Authentication required",
+		})
+		return
+	}
+
+	var req types.WithdrawRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, types.ErrorResponse{
+			Code:    http.StatusBadRequest,
+			Message: "Invalid request: " + err.Error(),
+		})
+		return
+	}
+
+	tx, err := h.paymentService.WithdrawToLightning(userID, &req)
+	if err != nil {
+		code := http.StatusBadRequest
+		if len(err.Error()) >= 20 && err.Error()[:20] == "insufficient balance" {
+			code = http.StatusPaymentRequired
+		}
+		c.JSON(code, types.ErrorResponse{
+			Code:    code,
+			Message: err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, tx)
+}
+
 // GetTransaction returns details of a specific transaction
 // GET /api/v1/payments/transactions/:id
 func (h *PaymentHandler) GetTransaction(c *gin.Context) {

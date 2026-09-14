@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"net/http"
+	"strings"
 
 	"instadoh-backend/config"
 	"instadoh-backend/middleware"
@@ -85,6 +86,7 @@ func (h *UserHandler) Register(c *gin.Context) {
 		CountryCode: req.CountryCode,
 		Currency:    country.Currency,
 		Role:        req.Role,
+		LNAddress:   generateLNAddress(req.Email, h.cfg),
 		IsActive:    true,
 	}
 
@@ -92,7 +94,7 @@ func (h *UserHandler) Register(c *gin.Context) {
 		if isDuplicateKeyError(err) {
 			c.JSON(http.StatusConflict, types.ErrorResponse{
 				Code:    http.StatusConflict,
-				Message: "Email or phone already registered",
+				Message: "Email already registered",
 			})
 			return
 		}
@@ -238,6 +240,21 @@ func (h *UserHandler) RefreshToken(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"token": newToken,
 	})
+}
+
+// generateLNAddress derives the user's Lightning Address from their email local
+// part on the configured LNURL domain (e.g. bob@example.com -> bob@instadoh.com).
+// This is what lets anyone on the Lightning Network pay the user globally.
+func generateLNAddress(email string, cfg *config.Config) string {
+	local := strings.TrimSpace(strings.ToLower(email))
+	at := strings.LastIndex(local, "@")
+	if at > 0 {
+		local = local[:at]
+	}
+	if local == "" {
+		return ""
+	}
+	return local + "@" + cfg.App.LNURLDomain
 }
 
 // isDuplicateKeyError checks if the error is a database duplicate key error

@@ -12,7 +12,7 @@ import (
 type User struct {
 	ID          uint           `gorm:"primaryKey"`
 	Email       string         `gorm:"uniqueIndex;size:255;not null"`
-	Phone       string         `gorm:"uniqueIndex;size:50;not null"`
+	Phone       string         `gorm:"size:50"`
 	Password    string         `gorm:"size:255;not null"`
 	FullName    string         `gorm:"size:255;not null"`
 	CountryCode string         `gorm:"size:2;not null"`
@@ -97,8 +97,9 @@ type MobileMoneyTransaction struct {
 type CrossBorderTransaction struct {
 	ID              uint       `gorm:"primaryKey"`
 	SenderID        uint       `gorm:"index;not null"`       // user sending money
-	ReceiverPhone   string     `gorm:"size:50;not null"`     // recipient's phone number
-	ReceiverCountry string     `gorm:"size:2;not null"`      // KE or UG
+	ReceiverEmail  string     `gorm:"size:255;not null"`    // recipient's email address
+	ReceiverPhone  string     `gorm:"size:50"`              // recipient's phone (optional, for mobile money)
+	ReceiverCountry string    `gorm:"size:2;not null"`      // KE or UG
 	SendAmount      float64    `gorm:"type:decimal(20,2);not null"`
 	SendCurrency    string     `gorm:"size:3;not null"`
 	ReceiveAmount   float64    `gorm:"type:decimal(20,2);not null"`
@@ -152,6 +153,7 @@ func (u *User) ToResponse() types.UserResponse {
 		Currency:    u.Currency,
 		Balance:     u.Balance,
 		Role:        u.Role,
+		LNAddress:   u.LNAddress,
 		CreatedAt:   u.CreatedAt,
 	}
 }

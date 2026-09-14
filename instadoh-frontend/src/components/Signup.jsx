@@ -3,28 +3,6 @@ import { Link, useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 import { authApi } from '../api/auth'
 import { Zap, ChevronRight, AlertCircle, ArrowLeft } from 'lucide-react'
-const countryPhoneCodes = {
-  US: '+1',
-  GB: '+44',
-  EU: '+32',
-  KE: '+254',
-  NG: '+234',
-  ZA: '+27',
-  GH: '+233',
-  IN: '+91',
-  BR: '+55',
-  MX: '+52',
-  JP: '+81',
-  CN: '+86',
-  AU: '+61',
-  CA: '+1',
-  CH: '+41',
-  SG: '+65',
-  PH: '+63',
-  TZ: '+255',
-  UG: '+256',
-  ET: '+251',
-}
 
 const fallbackCountries = [
   { Code: 'KE', Name: 'Kenya', Flag: '🇰🇪', Currency: 'KES', CurrencyName: 'Kenyan Shilling', IsActive: true },
@@ -68,20 +46,7 @@ function Signup() {
 
   const handleChange = (e) => {
     const { name, value } = e.target
-    setForm((prev) => {
-      const next = { ...prev, [name]: value }
-      
-      // If country changed, update phone prefix if phone is empty or contains only a prefix
-      if (name === 'country_code' && countryPhoneCodes[value]) {
-        const currentPhone = prev.phone.trim()
-        const isOnlyPrefix = Object.values(countryPhoneCodes).some(code => currentPhone === code)
-        if (!currentPhone || isOnlyPrefix) {
-          next.phone = countryPhoneCodes[value]
-        }
-      }
-      
-      return next
-    })
+    setForm((prev) => ({ ...prev, [name]: value }))
   }
 
   const handleSubmit = async (e) => {
@@ -142,15 +107,14 @@ function Signup() {
             </div>
 
             <div className="form-group">
-              <label htmlFor="phone">Phone System</label>
+              <label htmlFor="phone">Phone (Optional)</label>
               <input
                 id="phone"
                 name="phone"
                 type="tel"
-                placeholder={form.country_code ? `${countryPhoneCodes[form.country_code]} ...` : "+1 234 567 8900"}
+                placeholder="+1 234 567 8900 (for mobile money)"
                 value={form.phone}
                 onChange={handleChange}
-                required
               />
             </div>
           </div>

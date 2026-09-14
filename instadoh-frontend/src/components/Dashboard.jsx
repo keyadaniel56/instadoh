@@ -10,7 +10,6 @@ import {
   User, 
   RefreshCw, 
   LogOut, 
-  Bitcoin, 
   Zap, 
   DollarSign, 
   History,
@@ -67,35 +66,31 @@ function Dashboard() {
 
   const statCards = [
     {
-      icon: <Bitcoin size={20} />,
-      label: 'Bitcoin Balance',
-      value: balance?.balance?.toFixed(8) || '0.00000000',
-      unit: 'BTC',
-      change: stats?.balance_change || 0,
-      color: 'var(--color-primary)',
-    },
-    {
       icon: <DollarSign size={20} />,
-      label: 'USD Equivalent',
-      value: balance?.usd_value ? `$${balance.usd_value.toLocaleString()}` : '$0.00',
+      label: 'Fiat Balance',
+      value: balance ? `${balance.balance.toLocaleString()} ${balance.currency}` : '',
       unit: '',
-      change: stats?.usd_change || 0,
       color: '#10b981',
     },
     {
-      icon: <Zap size={20} />,
-      label: 'Active Invoices',
-      value: stats?.active_invoices?.toString() || '0',
+      icon: <TrendingUp size={20} />,
+      label: 'Total Received',
+      value: stats ? `${stats.total_received.toLocaleString()} ${balance?.currency || ''}` : '',
       unit: '',
-      change: stats?.invoice_change || 0,
-      color: '#f59e0b',
+      color: 'var(--color-primary)',
+    },
+    {
+      icon: <TrendingDown size={20} />,
+      label: 'Total Sent',
+      value: stats ? `${stats.total_sent.toLocaleString()} ${balance?.currency || ''}` : '',
+      unit: '',
+      color: 'var(--color-danger)',
     },
     {
       icon: <History size={20} />,
-      label: 'Total Volume',
-      value: stats?.total_transactions?.toString() || '0',
-      unit: 'TXs',
-      change: stats?.tx_change || 0,
+      label: 'Transactions',
+      value: stats?.transaction_count?.toString() || '0',
+      unit: '',
       color: 'var(--color-secondary)',
     },
   ]
@@ -186,10 +181,9 @@ function Dashboard() {
                     </div>
                     <div style={{ 
                       display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.75rem', fontWeight: 700,
-                      color: stat.change >= 0 ? 'var(--color-success)' : 'var(--color-danger)'
+                      color: 'var(--color-text-muted)'
                     }}>
-                      {stat.change >= 0 ? <TrendingUp size={14} /> : <TrendingDown size={14} />}
-                      <span>{Math.abs(stat.change)}%</span>
+                      <span>{balance?.currency || ''}</span>
                     </div>
                   </div>
                   <div style={{ color: 'var(--color-text-muted)', fontSize: '0.75rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '4px' }}>{stat.label}</div>
@@ -228,7 +222,7 @@ function Dashboard() {
                       {transactions.map((tx) => (
                         <tr key={tx.id}>
                           <td style={{ fontFamily: 'monospace', color: 'var(--color-text-muted)', fontSize: '0.8125rem' }}>
-                            {tx.id.substring(0, 12)}...
+                            #{tx.id}
                           </td>
                           <td style={{ fontSize: '0.875rem' }}>{formatDate(tx.created_at)}</td>
                           <td style={{ fontWeight: 700, color: tx.direction === 'incoming' ? 'var(--color-success)' : 'var(--color-text-main)' }}>
@@ -327,7 +321,7 @@ function Dashboard() {
                       {transactions.map((tx) => (
                         <tr key={tx.id}>
                           <td style={{ fontFamily: 'monospace', color: 'var(--color-text-muted)', fontSize: '0.8125rem' }}>
-                            {tx.id.substring(0, 12)}...
+                            #{tx.id}
                           </td>
                           <td style={{ fontSize: '0.875rem' }}>{formatDate(tx.created_at)}</td>
                           <td style={{ fontWeight: 700, color: tx.direction === 'incoming' ? 'var(--color-success)' : 'var(--color-text-main)' }}>

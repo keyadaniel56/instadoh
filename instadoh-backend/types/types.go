@@ -50,7 +50,7 @@ const (
 
 type RegisterRequest struct {
 	Email       string   `json:"email" binding:"required,email"`
-	Phone       string   `json:"phone" binding:"required"`
+	Phone       string   `json:"phone"`
 	Password    string   `json:"password" binding:"required,min=8"`
 	FullName    string   `json:"full_name" binding:"required"`
 	CountryCode string   `json:"country_code" binding:"required,len=2"`
@@ -101,20 +101,39 @@ type UgandaMobileDepositRequest struct {
 	Provider    string  `json:"provider" binding:"required"` // e.g., "mtn", "airtel"
 }
 
-// CrossBorderSendRequest handles sending cross-border
+// CrossBorderSendRequest handles sending cross-border payments via email
 type CrossBorderSendRequest struct {
-	RecipientPhone string  `json:"recipient_phone" binding:"required"`
+	RecipientEmail  string  `json:"recipient_email" binding:"required,email"`
 	RecipientCountry string `json:"recipient_country" binding:"required,len=2"` // KE or UG
-	Amount         float64 `json:"amount" binding:"required,gt=0"`
-	Currency       string  `json:"currency" binding:"required,len=3"` // Sender's currency (KES or UGX)
-	Description    string  `json:"description"`
+	Amount          float64 `json:"amount" binding:"required,gt=0"`
+	Currency        string  `json:"currency" binding:"required,len=3"` // Sender's currency (KES or UGX)
+	Description     string  `json:"description"`
 }
 
+// CrossBorderQuoteRequest gets a quote for a cross-border transfer
 // CrossBorderQuoteRequest gets a quote for a cross-border transfer
 type CrossBorderQuoteRequest struct {
 	FromCurrency string  `json:"from_currency" binding:"required,len=3"`
 	ToCurrency   string  `json:"to_currency" binding:"required,len=3"`
 	Amount       float64 `json:"amount" binding:"required,gt=0"`
+}
+
+// SendByEmailRequest sends money to another InstaDoh user by email
+type SendByEmailRequest struct {
+	RecipientEmail string  `json:"recipient_email" binding:"required,email"`
+	Amount         float64 `json:"amount" binding:"required,gt=0"`
+	Currency       string  `json:"currency" binding:"required,len=3"`
+	Description    string  `json:"description"`
+}
+
+// WithdrawRequest pays out the user's local-currency balance to an external
+// Lightning destination (a BOLT11 invoice or a Lightning Address). This is the
+// global "cash out to Lightning" path — no mobile money required.
+type WithdrawRequest struct {
+	Destination string  `json:"destination" binding:"required"` // bolt11 invoice or lightning address
+	Amount      float64 `json:"amount"`                         // in the user's currency; optional for fixed-amount invoices
+	Currency    string  `json:"currency" binding:"required,len=3"`
+	Description string  `json:"description"`
 }
 
 // --- Response DTOs ---
@@ -133,6 +152,7 @@ type UserResponse struct {
 	Currency    string    `json:"currency"`
 	Balance     float64   `json:"balance"`
 	Role        UserRole  `json:"role"`
+	LNAddress   string    `json:"ln_address"`
 	CreatedAt   time.Time `json:"created_at"`
 }
 
@@ -194,4 +214,14 @@ type CrossBorderQuote struct {
 	Fee           float64 `json:"fee"`
 	TotalInFiat   float64 `json:"total_in_fiat"`
 	ValidUntil    string  `json:"valid_until"`
+}
+
+// FeatureConfig describes the on/off-ramps available to the platform. Lightning
+// is the always-available global rail; mobile money providers are optional and
+// region-specific.
+type FeatureConfig struct {
+	LightningEnabled   bool   `json:"lightning_enabled"`
+	LNURLDomain        string `json:"ln_url_domain"`
+	MpesaEnabled       bool   `json:"mpesa_enabled"`
+	UgandaMobileEnabled bool  `json:"uganda_mobile_enabled"`
 }

@@ -76,8 +76,13 @@ func main() {
 	// Initialize auth middleware
 	authMiddleware := middleware.NewAuthMiddleware(&cfg.JWT)
 
+	// Initialize the Lightning Address (LUD-16) resolver. Lightning Addresses
+	// make the platform globally interoperable — anyone with a Lightning wallet
+	// can pay a user, and users can withdraw to any wallet in the world.
+	lnAddressService := services.NewLightningAddressService(cfg)
+
 	// Initialize payment service
-	paymentService := services.NewPaymentService(db, lndService, exchangeService, cfg)
+	paymentService := services.NewPaymentService(db, lndService, exchangeService, lnAddressService, cfg)
 
 	// Subscribe to invoice settlements so that when money arrives over
 	// Lightning, the recipient's local-currency balance is credited instantly.
@@ -107,9 +112,10 @@ func main() {
 	userHandler := handlers.NewUserHandler(db, cfg, authMiddleware)
 	paymentHandler := handlers.NewPaymentHandler(paymentService, exchangeService)
 	crossBorderHandler := handlers.NewCrossBorderHandler(crossBorderService)
+	lnurlpHandler := handlers.NewLNURLPHandler(db, cfg, paymentService)
 
 	// Setup Gin router
-	router := setupRouter(cfg, authMiddleware, userHandler, paymentHandler, crossBorderHandler)
+	router := setupRouter(cfg, authMiddleware, userHandler, paymentHandler, crossBorderHandler, lnurlpHandler)
 
 	// Start server
 	addr := cfg.Server.Host + ":" + fmt.Sprintf("%d", cfg.Server.Port)
@@ -147,6 +153,7 @@ func setupRouter(
 	userHandler *handlers.UserHandler,
 	paymentHandler *handlers.PaymentHandler,
 	crossBorderHandler *handlers.CrossBorderHandler,
+	lnurlpHandler *handlers.LNURLPHandler,
 ) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
@@ -172,12 +179,18 @@ func setupRouter(
 		})
 	})
 
+	// Public Lightning Address (lnurl-pay) endpoints. These allow any Lightning
+	// wallet on earth to pay an InstaDoh user via their Lightning Address.
+	router.GET("/.well-known/lnurlp/:username", lnurlpHandler.GetLNURLP)
+	router.GET("/api/v1/lnurlp/callback", lnurlpHandler.Callback)
+
 	// API v1 routes
 	v1 := router.Group("/api/v1")
 	{
 		// Public routes
 		v1.GET("/countries", userHandler.GetCountries)
 		v1.GET("/payments/rates", paymentHandler.GetExchangeRate)
+		v1.GET("/config", lnurlpHandler.GetConfig)
 
 		// Auth routes
 		authGroup := v1.Group("/auth")
@@ -200,6 +213,9 @@ func setupRouter(
 		{
 			paymentGroup.POST("/invoices", paymentHandler.CreateInvoice)
 			paymentGroup.POST("/send", paymentHandler.SendPayment)
+			paymentGroup.POST("/send-by-email", paymentHandler.SendByEmail)
+			paymentGroup.POST("/withdraw", paymentHandler.WithdrawLightning)
+			paymentGroup.GET("/resolve", paymentHandler.ResolveRecipient)
 			paymentGroup.GET("/transactions", paymentHandler.ListTransactions)
 			paymentGroup.GET("/transactions/:id", paymentHandler.GetTransaction)
 			paymentGroup.GET("/balance", paymentHandler.GetBalance)
@@ -212,6 +228,7 @@ func setupRouter(
 		crossBorderGroup.Use(auth.RequireAuth())
 		{
 			crossBorderGroup.GET("/quote", crossBorderHandler.GetQuote)
+			crossBorderGroup.GET("/resolve", crossBorderHandler.ResolveRecipient)
 			crossBorderGroup.POST("/send", crossBorderHandler.SendCrossBorder)
 			crossBorderGroup.GET("/transactions", crossBorderHandler.ListCrossBorderTransactions)
 			crossBorderGroup.GET("/transactions/:id", crossBorderHandler.GetCrossBorderTransaction)
