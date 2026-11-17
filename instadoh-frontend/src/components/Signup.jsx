@@ -36,8 +36,9 @@ function Signup() {
 
   useEffect(() => {
     authApi.getCountries().then((res) => {
-      if (res.data && res.data.length > 0) {
-        setCountries(res.data)
+      const data = res?.data
+      if (Array.isArray(data) && data.length > 0) {
+        setCountries(data)
       }
     }).catch(() => {
       // Keep using fallbackCountries if API is unavailable
