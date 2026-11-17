@@ -81,21 +81,11 @@ function Navbar() {
       </nav>
 
       {/* Mobile Navigation */}
-      <div className={`mobile-nav ${mobileOpen ? 'open' : ''}`} style={{
-        position: 'fixed',
-        top: 0,
-        right: 0,
-        width: '100%',
-        height: '100vh',
-        background: 'var(--color-bg)',
-        zIndex: 1100,
-        padding: '32px',
-        display: mobileOpen ? 'flex' : 'none',
-        flexDirection: 'column',
-        gap: '32px',
-        transform: mobileOpen ? 'translateX(0)' : 'translateX(100%)',
-        transition: 'transform 0.3s ease'
-      }}>
+      <div
+        className={`mobile-nav-overlay ${mobileOpen ? 'open' : ''}`}
+        onClick={() => setMobileOpen(false)}
+      />
+      <div className={`mobile-nav ${mobileOpen ? 'open' : ''}`}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <Link to="/" className="navbar-brand" onClick={() => setMobileOpen(false)}>
             <Zap size={24} className="text-gold" fill="currentColor" />
