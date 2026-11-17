@@ -67,7 +67,7 @@ function Signup() {
 
   return (
     <div className="auth-page">
-      <Link to="/" style={{ position: 'absolute', top: '40px', left: '40px', display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--color-text-muted)', fontSize: '0.875rem' }}>
+      <Link to="/" style={{ position: 'absolute', top: '40px', left: '40px', zIndex: 20, display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--color-text-muted)', fontSize: '0.875rem' }}>
         <ArrowLeft size={16} />
         <span>Back to Terminal</span>
       </Link>
