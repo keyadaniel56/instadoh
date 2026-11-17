@@ -41,9 +41,11 @@ function Dashboard() {
       ])
       setBalance(balRes.data)
       setStats(statsRes.data)
-      setTransactions(txsRes.data.data || [])
+      const txData = txsRes?.data?.data ?? txsRes?.data ?? []
+      setTransactions(Array.isArray(txData) ? txData : [])
     } catch (err) {
       setError(err.response?.data?.message || 'Failed to load dashboard data')
+      setTransactions([])
     } finally {
       setLoading(false)
     }

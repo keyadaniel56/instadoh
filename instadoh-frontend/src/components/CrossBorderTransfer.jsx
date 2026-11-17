@@ -146,9 +146,10 @@ function CrossBorderTransfer() {
     setTxsLoading(true)
     try {
       const res = await paymentsApi.listTransactions(1, 10)
-      setTransactions(res.data.data || [])
+      const data = res?.data?.data ?? res?.data ?? []
+      setTransactions(Array.isArray(data) ? data : [])
     } catch (err) {
-      // silently fail
+      setTransactions([])
     } finally {
       setTxsLoading(false)
     }
@@ -887,7 +888,7 @@ function CrossBorderTransfer() {
                     </span>
                   </td>
                   <td style={{ fontWeight: 700, color: tx.direction === 'incoming' ? 'var(--color-success)' : 'var(--color-text-main)' }}>
-                    {tx.direction === 'incoming' ? '+' : '-'}{tx.amount.toLocaleString()} {tx.currency}
+                    {tx.direction === 'incoming' ? '+' : '-'}{Number(tx.amount || 0).toLocaleString()} {tx.currency}
                   </td>
                   <td>
                     <div className={`status-pill ${tx.status === 'completed' ? 'success' : tx.status === 'pending' ? 'warning' : 'error'}`}>
